@@ -1,0 +1,1 @@
+clang++ -o ftag src/ftag.cc
