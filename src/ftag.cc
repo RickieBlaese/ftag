@@ -9,6 +9,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include <cstring>
+
 #include <sys/stat.h>
 #include <sys/xattr.h>
 /* setxattr("reconnect.mjs", "ftag.fid", "103", 3, 0) */
@@ -138,14 +140,13 @@ inline void trim_whitespace(std::string &str) {
     for (auto i = static_cast<std::int32_t>(str.size() - 1); i >= 0; i--) {
         if (std::isspace(str[i])) {
             str.erase(str.begin() + i);
-            i++;
         } else {
             break;
         }
     }
 }
 
-static constexpr std::string tags_filename = ".tags";
+static constexpr std::string tags_filename = "save.tags";
 
 std::int32_t hex_to_rgb(const std::string &s, color_t &color) {
     return sscanf(s.c_str(), "%2hx%2hx%2hx", &color.r, &color.g, &color.b); /* NOLINT */
@@ -340,8 +341,19 @@ void dump_saved_tags() {
 
 
 
-int main() {
+int main(int argc, char **argv) {
     read_saved_tags();
-    std::filesystem::remove(".tags");
-    dump_saved_tags();
+    if (argc <= 1) {
+        std::cout << "error: no action provided\ntry " << argv[0] << " --help for more information\n";
+        return 1;
+    }
+
+    for (std::uint32_t i = 1; i < argc; i++) {
+        if (!std::strcmp(argv[i], "--help")) {
+            std::cout << "usage: " << argv[0] << R"( [flags]
+
+
+)";
+        }
+    }
 }
