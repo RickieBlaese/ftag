@@ -48,9 +48,13 @@ T get_random_int() {
     return std::uniform_int_distribution<T>()(engine);
 }
 
-bool file_exists(const std::string &filename) {
-    struct stat buffer{};
-    return !stat(filename.c_str(), &buffer);
+bool file_exists(const std::string &filename, struct stat *pbuffer = nullptr) {
+    if (pbuffer != nullptr) {
+        return !stat(filename.c_str(), pbuffer);
+    } else {
+        struct stat buffer{};
+        return !stat(filename.c_str(), &buffer);
+    }
 }
 
 __ino_t path_get_ino(const std::filesystem::path &path) {
@@ -91,11 +95,12 @@ using tid_t = std::uint64_t; /* temporary, changes every run */
 
 struct tag_t {
     std::uint64_t id = 0;
-    std::string name; /* can't have spaces, parens, colons, and cannot start with a dash, encourages plain naming style something-like-this */
+    std::string name; /* can't have spaces, parens, square brackets, colons, and cannot start with a dash, encourages plain naming style something-like-this */
     std::optional<color_t> color;
     std::vector<tid_t> sub;
     std::vector<tid_t> super;
     std::vector<__ino_t> files; /* file inode numbers */
+    bool enabled = true;
 };
 
 struct file_info_t {
@@ -214,10 +219,28 @@ std::string rgb_to_hex(const color_t &color) {
     return s.str();
 }
 
+std::filesystem::path make_canonical(const std::string &pathstr) {
+    std::filesystem::path can(pathstr);
+    if (can.is_absolute()) {
+        return can;
+    }
+    if (!file_exists(pathstr)) {
+        std::ofstream temp(pathstr);
+        temp.close();
+        can = std::filesystem::canonical(pathstr);
+        std::filesystem::remove(can);
+    } else {
+        can = std::filesystem::canonical(pathstr);
+    }
+    return can;
+}
+
 /* loops in the tag graph are discouraged but are allowed, including a tag having a supertag be itself */
 
 /* *** RUN read_file_index BEFORE THIS ***
  * in order to correctly/efficiently add to file_info_t::tags
+ *
+ * [] denote the state list, right now only possible members are 'd' for disabled and 'e' for enabled (default, so specifying 'e' is redundant)
  *
  * --- tag file structure ---
  *
@@ -226,6 +249,9 @@ std::string rgb_to_hex(const color_t &color) {
  * -[file inode number]
  * other-tag-name (FF0000): blah-super-tag super-tag
  * blah-tag-name (#FF7F7F)
+ * disabled-tag-name [d] (#FF7F7F): enabled-tag-name
+ * enabled-tag-name
+ * also-enabled-tag-name [e]
  */
 void read_saved_tags() {
     if (!file_exists(tags_filename)) {
@@ -295,27 +321,56 @@ void read_saved_tags() {
             if (ttag.empty()) {
                 ERR_EXIT(1, "tag file \"%s\" line %i had empty tag name", tags_filename.c_str(), i + 1);
             }
-            if (ttag.find(')') != std::string::npos && ttag.find('(') != std::string::npos) {
+            std::size_t sqbegin = ttag.find('[');
+            std::size_t sqend = ttag.find(']');
+            std::size_t pbegin = ttag.find('(');
+            std::size_t pend = ttag.find(')');
+            bool has_states = false;
+            bool has_color = false;
+
+            if (sqend != std::string::npos && sqbegin != std::string::npos) {
+                if (sqbegin >= sqend) {
+                    ERR_EXIT(1, "tag file \"%s\" line %i state list had ']' before '['", tags_filename.c_str(), i + 1);
+                }
+                has_states = true;
+                std::string statesstr = ttag.substr(sqbegin + 1, sqend - sqbegin - 1);
+                std::vector<std::string> states;
+                split(statesstr, ",", states);
+                for (const std::string &state : states) {
+                    std::string rwstate = state;
+                    if (rwstate == "e") {
+                        current_tag.value().enabled = true;
+                    } else if (rwstate == "d") {
+                        current_tag.value().enabled = false;
+                    }
+                }
+            }
+            if (pend != std::string::npos && pbegin != std::string::npos) {
                 current_tag.value().color = color_t();
-                if (ttag.find('(') >= ttag.find(')')) {
+                if (pbegin >= pend) {
                     ERR_EXIT(1, "tag file \"%s\" line %i color had ')' before '('", tags_filename.c_str(), i + 1);
                 }
-                std::string hexstr = ttag.substr(ttag.find('(') + 1, ttag.find(')') - ttag.find('(') - 1);
+                has_color = true;
+                std::string hexstr = ttag.substr(pbegin + 1, pend - pbegin - 1);
                 if (hexstr[0] == '#') { hexstr.erase(hexstr.begin()); }
                 if (hex_to_rgb(hexstr, current_tag.value().color.value()) != 3) {
                     ERR_EXIT(1, "tag file \"%s\" line %i had bad hex color: \"%s\"", tags_filename.c_str(), i + 1, hexstr.c_str());
                 }
-                tname = ttag.substr(0, ttag.find('('));
+            }
+
+            if (has_color || has_states) {
+                tname = ttag.substr(0, std::min(pbegin, sqbegin));
             } else {
                 tname = ttag;
             }
+
             if (tname.empty()) {
                 ERR_EXIT(1, "tag file \"%s\" line %i had empty tag name", tags_filename.c_str(), i + 1);
             }
             /* check if tname is good */
             bool name_bad = (tname[0] == '-');
             for (const char &c : tname) {
-                name_bad = name_bad || (c == ' ' || c == '(' || c == ')' || c == ':');
+                name_bad = name_bad || (c == ' ' || c == '(' || c == ')' || c == '[' || c == ']' || c == ':');
             }
             if (name_bad) {
                 ERR_EXIT(1, "tag file \"%s\" line %i had bad tag name: \"%s\"", tags_filename.c_str(), i + 1, tname.c_str());
@@ -388,6 +443,13 @@ void dump_saved_tags() {
     std::ofstream file(tags_filename);
     for (const auto &[id, tag] : tags) {
         file << tag.name;
+
+        /* states */
+        if (!tag.enabled) {
+            file << " [d]";
+        }
+        /* end states */
+
         if (tag.color.has_value()) {
             file << " (#" << rgb_to_hex(tag.color.value()) << ')'; /* NOLINT */
         }
@@ -424,7 +486,7 @@ void read_file_index() {
         }
         std::vector<std::string> sections;
         sections.reserve(2);
-        split(line, ":", sections, 2);
+        split(line, ":", sections, 2); /* guaranteed at least size 2 from earlier ':' check */
         __ino_t file_ino = std::strtoul(sections[0].c_str(), nullptr, 0);
         if (file_ino == 0) {
             ERR_EXIT(1, "index file \"%s\" line %i had bad file inode number \"%s\"", index_filename.c_str(), i, sections[0].c_str());
@@ -434,12 +496,17 @@ void read_file_index() {
             ERR_EXIT(1, "index file \"%s\" line %i had bad location data \"%s\", could not find null delimiter", index_filename.c_str(), i, sections[1].c_str());
         }
         std::string pathstr = sections[1].substr(0, null_loc);
+        struct stat buffer{};
+        bool exists = file_exists(pathstr, &buffer);
         if (pathstr.empty()) {
             WARN("index file \"%s\" had file inode number %lu with empty file path, you might want to run the update command", index_filename.c_str(), file_ino);
-        } else if (!pathstr.empty() && !file_exists(pathstr)) {
+        } else if (!pathstr.empty() && !exists) {
             WARN("index file \"%s\" had file inode number %lu with file path \"%s\" which does not exist, you might want to run the update command", index_filename.c_str(), file_ino, pathstr.c_str());
+        } else if (exists && buffer.st_ino != file_ino) {
+            WARN("index file \"%s\" had file inode number %lu with file path \"%s\" which exists but has different inode number %lu on disk, you might want to run the update command", index_filename.c_str(), file_ino, pathstr.c_str(), buffer.st_ino);
         }
-        file_index[file_ino] = file_info_t{file_ino, pathstr};
+        std::filesystem::path can = make_canonical(pathstr);
+        file_index[file_ino] = file_info_t{file_ino, can};
     }
 }
 
@@ -448,6 +515,17 @@ void dump_file_index() {
     for (const auto &[file_ino, file_info] : file_index) {
         file << file_ino << ':' << std::filesystem::path(file_info.pathstr).root_path().string() << std::string{'\0'} + "\n";
     }
+}
+
+
+std::vector<tid_t> enabled_only(const std::vector<tid_t> &tagids) {
+    std::vector<tid_t> ret;
+    for (const tid_t &id : tagids) {
+        if (tags[id].enabled) {
+            ret.push_back(id);
+        }
+    }
+    return ret;
 }
 
 
@@ -505,7 +583,7 @@ const std::unordered_map<std::string, search_opt_t> arg_to_opt = { /* NOLINT */
 };
 
 void add_all(const tid_t &tagid, std::vector<tid_t> &tags_visited, std::unordered_map<tid_t, bool> &tags_map, std::unordered_map<__ino_t, bool> &files_map, bool exclude) {
-    for (const tid_t &id : tags[tagid].sub) {
+    for (const tid_t &id : enabled_only(tags[tagid].sub)) {
         if (std::find(tags_visited.begin(), tags_visited.end(), id) == tags_visited.end()) {
             tags_visited.push_back(id);
             tags_map[id] = !exclude;
@@ -520,17 +598,18 @@ void add_all(const tid_t &tagid, std::vector<tid_t> &tags_visited, std::unordere
 void display_tag_info(const tag_t &tag, std::vector<tid_t> &tags_visited, bool color_enabled, const show_tag_info_t &show_tag_info, bool no_formatting, bool original = false) { /* notably, does not append newline */
     if (std::find(tags_visited.begin(), tags_visited.end(), tag.id) == tags_visited.end()) {
         tags_visited.push_back(tag.id);
-        if (show_tag_info != show_tag_info_t::name_only && !tag.super.empty()) { /* displaying chain */
-            if (tag.super.size() > 1) {
+        std::vector<tid_t> tagsuper = enabled_only(tag.super);
+        if (show_tag_info != show_tag_info_t::name_only && !tagsuper.empty()) { /* displaying chain */
+            if (tagsuper.size() > 1) {
                 std::cout << '(';
-                for (std::uint32_t i = 0; i < tag.super.size() - 1; i++) {
-                    display_tag_info(tags[tag.super[i]], tags_visited, color_enabled, show_tag_info, no_formatting);
+                for (std::uint32_t i = 0; i < tagsuper.size() - 1; i++) {
+                    display_tag_info(tags[tagsuper[i]], tags_visited, color_enabled, show_tag_info, no_formatting);
                     std::cout << " | ";
                 }
-                display_tag_info(tags[tag.super[tag.super.size() - 1]], tags_visited, color_enabled, show_tag_info, no_formatting);
+                display_tag_info(tags[tagsuper[tagsuper.size() - 1]], tags_visited, color_enabled, show_tag_info, no_formatting);
                 std::cout << ')';
             } else {
-                display_tag_info(tags[tag.super[0]], tags_visited, color_enabled, show_tag_info, no_formatting);
+                display_tag_info(tags[tagsuper[0]], tags_visited, color_enabled, show_tag_info, no_formatting);
             }
             std::cout << " > ";
         }
@@ -548,18 +627,49 @@ void display_tag_info(const tag_t &tag, std::vector<tid_t> &tags_visited, bool c
     }
     if (show_tag_info == show_tag_info_t::full_info) {
         std::cout << " [" << tag.files.size() << "]";
-        if (!tag.sub.empty()) {
+        std::vector<tid_t> tagsub = enabled_only(tag.sub);
+        if (!tagsub.empty()) {
             std::cout << " > ";
-            for (std::uint32_t i = 0; i < tag.sub.size() - 1; i++) {
-                std::vector<tid_t> fake_tags_visited = {tag.sub[i]};
-                display_tag_info(tags[tag.sub[i]], fake_tags_visited, color_enabled, show_tag_info_t::name_only, no_formatting);
+            for (std::uint32_t i = 0; i < tagsub.size() - 1; i++) {
+                std::vector<tid_t> fake_tags_visited = {tagsub[i]};
+                display_tag_info(tags[tagsub[i]], fake_tags_visited, color_enabled, show_tag_info_t::name_only, no_formatting);
                 std::cout << " | ";
             }
-            std::vector<tid_t> fake_tags_visited = {tag.sub[tag.sub.size() - 1]};
-            display_tag_info(tags[tag.sub[tag.sub.size() - 1]], fake_tags_visited, color_enabled, show_tag_info_t::name_only, no_formatting);
+            std::vector<tid_t> fake_tags_visited = {tagsub[tagsub.size() - 1]};
+            display_tag_info(tags[tagsub[tagsub.size() - 1]], fake_tags_visited, color_enabled, show_tag_info_t::name_only, no_formatting);
         }
     }
 }
+
+
+/* does also output a newline, unlike display_tag_info */
+void display_file_info(const file_info_t &file_info, const show_file_info_t &show_file_info, bool no_formatting) {
+    if (!no_formatting) {
+        std::cout << "    ";
+    }
+    if (file_info.unresolved()) {
+        if (!no_formatting) {
+            bold_underline_out();
+        }
+        std::cout << "<unresolved>";
+        if (show_file_info == show_file_info_t::full_info) {
+            std::cout << " (" << file_info.file_ino << ")";
+        }
+        if (!no_formatting) {
+            reset_out();
+        }
+    } else {
+        if (show_file_info == show_file_info_t::full_path) {
+            std::cout << file_info.pathstr;
+        } else if (show_file_info == show_file_info_t::full_info) {
+            std::cout << file_info.filename() << " (" << file_info.file_ino << "): " << file_info.pathstr;
+        } else {
+            std::cout << file_info.filename();
+        }
+    }
+    std::cout << '\n';
+}
+
 
 
 
@@ -579,7 +689,8 @@ description:
     doesn't modify the files on disk at all
 
     tags consist of a name, an optional color, and so-called supertags that it descends from
-    tag names can't have spaces, parens, colons, and cannot start with a dash, encouraging a plain naming style like-this
+    tag names can't have spaces, parens, square brackets, colons, and cannot start with a dash, encouraging a
+    plain naming style like-this
 
     with designating supertags, you can construct a large and complicated tag graph. ftag supports it fine and works with
     it, but placing a tag in a cycle with itself is discouraged for obvious reasons
@@ -618,7 +729,7 @@ command flags:
                                              only has an effect when used with --file and --file-exclude
         --search-file-path                 : instead of searching by filenames, search the entire file path
                                              only has an effect when used with --file and --file-exclude
-                                           ***              may produce unexpected results              ***
+                                           *** warning: may produce unexpected results
 
         --tags-files                       : displays both tags and files in result (default)
         --tags-only                        : only displays tags in result, no files
@@ -628,7 +739,7 @@ command flags:
         --disable-color                    : disables displaying tag color
 
         --tag-name-only                    : shows only the tag name (still includes color) (default)
-        --display-tag-chain                : shows the tag chain each tag descends from, up to and including repeat
+        --display-tag-chain                : shows the tag chain each tag descends from, up to and including repeats
         --full-tag-info                    : shows all information about a tag
 
         --filename-only                    : shows only the filename of each file (default)
@@ -649,38 +760,63 @@ command flags:
         without any flags, the search command runs --all-list
 
     tag:
-        -c, --create <name> [color]   : creates a tag with the name <name> and hex color [color]
-        -d, --delete <name>           : deletes a tag with the name <name>
-        -e, --edit <name> <flags>
-            flags:
-                -as,  --add-super <supername>        : adds the tag <supername> to the tag <name>'s supertags
-                -rs,  --remove-super <supername>     : removes the tag <supername> from the tag <name>'s supertags
-                                                       (errors if <supername> is not in tag <name>'s supertags)
-                -rsq, --remove-super-q <supername>   : same as --remove-super, except it does not error and is silent
-                -ras,  --remove-all-super            : removes all supertags from tag <name>
+        subcommands:
+            create <name> [color]     : creates a tag with the name <name> and hex color [color]
+            delete <name>             : deletes a tag with the name <name>
+            enable <name>             : enables a tag with the name <name>
+            disable <name>            : disables a tag with the name <name>
+            edit <name> <flags>       : edits a tag
+                flags:
+                    -as,  --add-super <supername>        : adds the tag <supername> to the tag <name>'s supertags
+                    -rs,  --remove-super <supername>     : removes the tag <supername> from the tag <name>'s supertags
+                                                           (errors if tag <supername> is not in tag <name>'s supertags)
+                    -rsq, --remove-super-q <supername>   : same as --remove-super, except it does not error and is silent
+                    -ras, --remove-all-super             : removes all supertags from tag <name>
+
+                    -ab,  --add-sub <subname>            : forcibly make the tag <subname> descend from tag <name>
+                    -rb,  --remove-sub <subname>         : forcibly remove the tag <name> from the tag <subname>'s supertags
+                                                           (errors if tag <name> is not in tag <subname>'s supertags)
+                    -rbq, --remove-sub-q <subname>       : same as --remove-sub, except it does not error and is silent
+                    -rab, --remove-all-sub               : forcibly removes tag <name> from all tags' supertags
+
+                    -c,   --color <color>                : changes the tag <name>'s hex color to <color>
+                    -rc,  --remove-color                 : removes the tag <name>'s color
+
+                    -e,   --enable                       : enables the tag <name>
+                    -d,   --disable                      : enables the tag <name>
 
     add, rm:
         -f, --file <file OR directory> [file OR directory] ...  : adds/removes files or single directories to be tracked
                                                                   (does not iterate through the contents of the directories)
-        -d, --directory <directory> [directory] ...             : adds/removes everything in the directories (recursive)
+        -r, --recursive <directory> [directory] ...             : adds/removes everything in the directories (recursive)
+                                                                *** note: the rm command first tries to find the passed path in the
+                                                                *** file index, then tries to remove by the inode number found on disk
+                                                                *** to change this behavior, see --no-search-index
+
         -i, --inode <inum> [inum] ...                           : adds/removes inode numbers from the index
+
+    rm:
+       --search-index                                           : searches through the index first to match paths when passed a
+                                                                  --file or --recursive (default)
+       --no-search-index                                        : does not search through the index first to match paths when passed a
+                                                                  --file or --recursive
 
     update:
         -f, --file <file OR directory> [file OR directory] ...  : updates files or single directories to be tracked
                                                                   (does not iterate through the contents of the directories)
-        -d, --directory <directory> [directory] ...             : updates everything in the directories (recursive)
+        -r, --recursive <directory> [directory] ...             : updates everything in the directories (recursive)
 
-        unfortunately, you cannot pass multiple flags (excluding -i, --inode) for adding/updating/removing in one invocation
+        unfortunately, you cannot pass multiple flags (excluding -i, --inode) for adding/removing/updating in one invocation
         of ftag to allow you to use all file/directory names, i.e. invoke only one of them at a time like this:
             )" << argv[0] << R"( add -f file1.txt ../script.py
-            )" << argv[0] << R"( update --directory ./directory1 /home/user
+            )" << argv[0] << R"( update --recursive ./directory1 /home/user
         you may, however, pass multiple inode flags and then end with a file or directory flag like such:
-            )" << argv[0] << R"( rm -i 293 100 --inode 104853 --directory ../testing /usr/lib
+            )" << argv[0] << R"( rm -i 293 100 --inode 104853 --recursive ../testing /usr/lib
         this is because it is impossible for an <inum> to be a valid flag, and any argument passed in that position can
         be unambiguously determined to be a flag or a positive integer
 
-        when update-ing, ftag always assumes the inode numbers stored in the file index ")" << index_filename << R"(
-        and tags file \")" << tags_filename << R"(" are correct
+        when update-ing, ftag always assumes the inode numbers stored in the file index ")" << index_filename << R"("
+        and tags file ")" << tags_filename << R"(" are correct
         to reassign/change the inodes in the file index and tags file, use the fix command
 
     fix:
@@ -720,55 +856,38 @@ command flags:
             std::string targ = argv[i];
             if (targ == "--tags-files") {
                 display_type = display_type_t::tags_files;
-                continue;
             } else if (targ == "--tags-only") {
                 display_type = display_type_t::tags;
-                continue;
             } else if (targ == "--files-only") {
                 display_type = display_type_t::files;
-                continue;
             } else if (targ == "--search-file-path") {
                 search_file_path = true;
-                continue;
             } else if (targ == "--search-file-name") {
                 search_file_path = false;
-                continue;
             } else if (targ == "--enable-color") {
                 color_enabled = true;
-                continue;
             } else if (targ == "--disable-color") {
                 color_enabled = false;
-                continue;
             } else if (targ == "--formatting") {
                 no_formatting = false;
-                continue;
             } else if (targ == "--no-formatting") {
                 no_formatting = true;
-                continue;
             } else if (targ == "--only-filename") {
                 show_file_info = show_file_info_t::filename_only;
-                continue;
             } else if (targ == "--show-full-path") {
                 show_file_info = show_file_info_t::full_path;
-                continue;
             } else if (targ == "--full-file-info") {
                 show_file_info = show_file_info_t::full_info;
-                continue;
             } else if (targ == "--organize-by-file") {
                 organize_by_tag = false;
-                continue;
             } else if (targ == "--organize-by-tag") {
                 organize_by_tag = true;
-                continue;
             } else if (targ == "--full-tag-info") {
                 show_tag_info = show_tag_info_t::full_info;
-                continue;
             } else if (targ == "--display-tag-chain") {
                 show_tag_info = show_tag_info_t::chain;
-                continue;
             } else if (targ == "--tag-name-only") {
                 show_tag_info = show_tag_info_t::name_only;
-                continue;
             }
 
             std::string main_arg;
@@ -807,7 +926,7 @@ command flags:
             }
             search_rules.push_back(search_rule_t{rule_type, sopt, std::string(argv[++i])});
         }
-        if (color_enabled && !no_formatting) {
+        if (!no_formatting) {
             reset_out();
         }
         std::unordered_map<tid_t, bool> tags_returned;
@@ -819,7 +938,7 @@ command flags:
             files_returned[file_ino] = false;
         }
         for (const search_rule_t &search_rule : search_rules) {
-            bool exclude = search_rule.type == search_rule_type_t::tag_exclude || search_rule.type == search_rule_type_t::file_exclude || search_rule.type == search_rule_type_t::all_exclude;
+            bool exclude = search_rule.type == search_rule_type_t::tag_exclude || search_rule.type == search_rule_type_t::file_exclude || search_rule.type == search_rule_type_t::all_exclude || search_rule.type == search_rule_type_t::all_list_exclude;
             bool is_file = search_rule.type == search_rule_type_t::file || search_rule.type == search_rule_type_t::file_exclude;
             bool is_tag = search_rule.type == search_rule_type_t::tag || search_rule.type == search_rule_type_t::tag_exclude;
             bool is_all = search_rule.type == search_rule_type_t::all || search_rule.type == search_rule_type_t::all_exclude;
@@ -834,12 +953,19 @@ command flags:
             } else if (search_rule.opt == search_opt_t::exact) {
                 if (is_file) {
                     for (const auto &[file_ino, file_info] : file_index) {
-                        if (file_info.filename() == search_rule.text) {
-                            files_returned[file_ino] = !exclude;
+                        if (search_file_path) {
+                            if (file_info.pathstr == search_rule.text) {
+                                files_returned[file_ino] = !exclude;
+                            }
+                        } else {
+                            if (file_info.filename() == search_rule.text) {
+                                files_returned[file_ino] = !exclude;
+                            }
                         }
                     }
                 } else if (is_tag) {
                     for (const auto &[id, tag] : tags) {
+                        if (!tag.enabled) { continue; }
                         if (tag.name == search_rule.text) {
                             tags_returned[id] = !exclude;
                             for (const __ino_t &file_ino : tag.files) {
@@ -849,6 +975,7 @@ command flags:
                     }
                 } else if (is_all) {
                     for (const auto &[id, tag] : tags) {
+                        if (!tag.enabled) { continue; }
                         if (tag.name == search_rule.text) {
                             tags_returned[id] = !exclude;
                             std::vector<tid_t> tags_visited;
@@ -859,12 +986,19 @@ command flags:
             } else if (search_rule.opt == search_opt_t::text_includes) {
                 if (is_file) {
                     for (const auto &[file_ino, file_info] : file_index) {
-                        if (file_info.filename().find(search_rule.text) != std::string::npos) {
-                            files_returned[file_ino] = !exclude;
+                        if (search_file_path) {
+                            if (file_info.pathstr.find(search_rule.text) != std::string::npos) {
+                                files_returned[file_ino] = !exclude;
+                            }
+                        } else {
+                            if (file_info.filename().find(search_rule.text) != std::string::npos) {
+                                files_returned[file_ino] = !exclude;
+                            }
                         }
                     }
                 } else if (is_tag) {
                     for (const auto &[id, tag] : tags) {
+                        if (!tag.enabled) { continue; }
                         if (tag.name.find(search_rule.text) != std::string::npos) {
                             tags_returned[id] = !exclude;
                             for (const __ino_t &file_ino : tag.files) {
@@ -874,6 +1008,7 @@ command flags:
                     }
                 } else if (is_all) {
                     for (const auto &[id, tag] : tags) {
+                        if (!tag.enabled) { continue; }
                         if (tag.name.find(search_rule.text) != std::string::npos) {
                             tags_returned[id] = !exclude;
                             std::vector<tid_t> tags_visited;
@@ -885,12 +1020,19 @@ command flags:
                 std::regex rg(search_rule.text);
                 if (is_file) {
                     for (const auto &[file_ino, file_info] : file_index) {
-                        if (std::regex_search(file_info.filename(), rg)) {
-                            files_returned[file_ino] = !exclude;
+                        if (search_file_path) {
+                            if (std::regex_search(file_info.pathstr, rg)) {
+                                files_returned[file_ino] = !exclude;
+                            }
+                        } else {
+                            if (std::regex_search(file_info.filename(), rg)) {
+                                files_returned[file_ino] = !exclude;
+                            }
                         }
                     }
                 } else if (is_tag) {
                     for (const auto &[id, tag] : tags) {
+                        if (!tag.enabled) { continue; }
                         if (std::regex_search(tag.name, rg)) {
                             tags_returned[id] = !exclude;
                             for (const __ino_t &file_ino : tag.files) {
@@ -900,6 +1042,7 @@ command flags:
                     }
                 } else if (is_all) {
                     for (const auto &[id, tag] : tags) {
+                        if (!tag.enabled) { continue; }
                         if (std::regex_search(tag.name, rg)) {
                             tags_returned[id] = !exclude;
                             std::vector<tid_t> tags_visited;
@@ -909,21 +1052,6 @@ command flags:
                 }
             }
         }
-
-        /* does also output a newline, unlike display_tag_info */
-        const auto display_file_info = [show_file_info, no_formatting](const file_info_t &file_info) {
-            if (!no_formatting) {
-                std::cout << "    ";
-            }
-            if (show_file_info == show_file_info_t::full_path) {
-                std::cout << file_info.pathstr;
-            } else if (show_file_info == show_file_info_t::full_info) {
-                std::cout << file_info.filename() << " (" << file_info.file_ino << "): " << file_info.pathstr;
-            } else {
-                std::cout << file_info.filename();
-            }
-            std::cout << '\n';
-        };
 
         /* now display the results */
         if (organize_by_tag) {
@@ -945,7 +1073,7 @@ command flags:
                     std::cout << ":\n";
                     for (const __ino_t &file_ino : tag.files) {
                         if (!files_returned[file_ino]) { continue; }
-                        display_file_info(file_index[file_ino]);
+                        display_file_info(file_index[file_ino], show_file_info, no_formatting);
                     }
                 }
                 std::cout << '\n';
@@ -954,11 +1082,11 @@ command flags:
             for (const auto &[file_ino, file_inc] : files_returned) {
                 if (!file_inc) { continue; }
                 std::vector<__ino_t> group = {file_ino};
-                std::vector<tid_t> ttags = file_index[file_ino].tags;
+                std::vector<tid_t> ttags = enabled_only(file_index[file_ino].tags);
                 std::sort(ttags.begin(), ttags.end());
                 for (const auto &[ofile_ino, ofile_inc] : files_returned) {
                     if (!ofile_inc || ofile_ino == file_ino) { continue; }
-                    std::vector<tid_t> otags = file_index[ofile_ino].tags;
+                    std::vector<tid_t> otags = enabled_only(file_index[ofile_ino].tags);
                     std::sort(otags.begin(), otags.end());
                     if (otags == ttags) {
                         group.push_back(ofile_ino);
@@ -975,13 +1103,14 @@ command flags:
                 }
                 std::cout << ":\n";
                 for (const __ino_t &ofile_ino : group) {
-                    display_file_info(file_index[ofile_ino]);
+                    display_file_info(file_index[ofile_ino], show_file_info, no_formatting);
                 }
             }
         }
     /* end of search command */
-    } else if (!std::strcmp(argv[1], "add") || !std::strcmp(argv[1], "rm") || !std::strcmp(argv[1], "update")) {
+    } else if (is_add || is_rm || is_update) {
         std::vector<file_info_t> to_change;
+
         const auto get_all = [&to_change](const std::filesystem::path &path, bool recurse) -> void {
             if (!recurse) {
                 for (const auto &entry : std::filesystem::directory_iterator(path)) {
@@ -997,31 +1126,74 @@ command flags:
                 }
             }
         };
+
+        bool search_index_first = true;
+        
+        const auto path_ok = [](const std::string &pathstr) -> bool {
+            try {
+                const std::filesystem::path p = std::filesystem::path(pathstr);
+            } catch (const std::exception &e) {
+                return false;
+            }
+            return true;
+        };
+
         for (std::uint32_t i = 2; i < argc; i++) {
             if (!std::strcmp(argv[i], "-f") || !std::strcmp(argv[i], "--file")) {
                 i++;
+                if (i >= argc) {
+                    ERR_EXIT(1, "expected at least one file/directory after file flag");
+                }
                 for (; i < argc; i++) {
                     if (argv[i][0] == '-') {
                         WARN("argument %i file/directory \"%s\" began with '-', interpreting as a file, you cannot pass another flag", i, argv[i]);
                     }
-                    const std::filesystem::path tpath(argv[i]);
+                    if (!path_ok(argv[i])) {
+                        ERR_EXIT(1, "argument %i file/directory \"%s\" could not construct path", i, argv[i]);
+                    }
+
+                    const std::filesystem::path tpath = make_canonical(argv[i]);
+
+                    if (is_rm) { /* can remove without filepath existing or being regular file/directory */
+                        bool found = false;
+                        if (search_index_first) {
+                            for (const auto &[file_ino, file_info] : file_index) {
+                                if (path_ok(file_info.pathstr)) {
+                                    std::filesystem::path opath = make_canonical(file_info.pathstr);
+                                    if (tpath == opath) {
+                                        to_change.push_back(file_info);
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if (!found) {
+                            WARN("argument %i file/directory \"%s\" passed to rm command was searched in file index", i, argv[i]);
+                        }
+                        continue;
+                    }
+
                     if (!file_exists(argv[i])) {
                         ERR_EXIT(1, "argument %i file/directory \"%s\" does not exist, cannot get inode number", i, tpath.c_str());
                     }
                     if (std::filesystem::is_regular_file(tpath) || std::filesystem::is_directory(tpath)) {
                         to_change.push_back(file_info_t{path_get_ino(argv[i]), argv[i]});
                     } else {
-                        ERR_EXIT(1, "argument %i file/directory \"%s\" was not a regular file or directory", i, tpath.c_str());
+                        ERR_EXIT(1, "argument %i file/directory \"%s\" exists but was not a regular file or directory", i, tpath.c_str());
                     }
                 }
-            } else if (!std::strcmp(argv[i], "-d") || !std::strcmp(argv[i], "--directory")) {
+            } else if (!std::strcmp(argv[i], "-r") || !std::strcmp(argv[i], "--recursive")) {
                 i++;
                 if (i >= argc) {
-                    ERR_EXIT(1, "directory flag ")
+                    ERR_EXIT(1, "expected at least one directory after recursive flag");
                 }
                 for (; i < argc; i++) {
                     if (argv[i][0] == '-') {
                         WARN("argument %i directory \"%s\" began with '-', interpreting as a directory, you cannot pass another flag", i, argv[i]);
+                    }
+                    if (!path_ok(argv[i])) {
+                        ERR_EXIT(1, "argument %i directory \"%s\" could not construct path", i, argv[i]);
                     }
                     const std::filesystem::path tpath(argv[i]);
                     if (!file_exists(argv[i])) {
@@ -1035,9 +1207,12 @@ command flags:
                 }
             } else if (!std::strcmp(argv[i], "-i") || !std::strcmp(argv[i], "--inode")) {
                 if (is_update) {
-                    ERR_EXIT(1, "cannot update from inode numbers, specify files or directories with the appropriate flags,\ntry reading the update command section of %s --help for more info", argv[0]);
+                    ERR_EXIT(1, "cannot update from inode numbers, specify files or directories with the appropriate flags\nread the update command section of %s --help for more info", argv[0]);
                 }
                 i++;
+                if (i >= argc) {
+                    ERR_EXIT(1, "expected at least one inode number after inode flag");
+                }
                 for (; i < argc; i++) {
                     if (argv[i][0] == '-') {
                         i--;
@@ -1049,10 +1224,34 @@ command flags:
                     }
                     to_change.push_back(file_info_t{file_ino});
                 }
+            } else if (!std::strcmp(argv[i], "--search-index")) {
+                search_index_first = true;
+            } else if (!std::strcmp(argv[i], "--no-search-index")) {
+                search_index_first = false;
             }
 
         }
         if (is_add) {
+            for (const file_info_t &file_info : to_change) {
+                if (file_index.contains(file_info.file_ino)) {
+                    WARN("file index already has inode number %lu with file \"%s\", cannot add, skipping", file_info.file_ino, file_info.pathstr.c_str());
+                } else {
+                    file_index[file_info.file_ino] = file_info;
+                    if (file_info.unresolved()) {
+                        WARN("added file passed with inode number %lu was unresolved with no file path, you might want to run the update command", file_info.file_ino);
+                    }
+                }
+            }
+            dump_file_index();
+        } else if (is_rm) {
+            for (const file_info_t &file_info : to_change) {
+                if (!file_index.contains(file_info.file_ino)) {
+                    WARN("file index did not have inode number %lu, cannot remove, skipping", file_info.file_ino);
+                } else {
+                    file_index.erase(file_info.file_ino);
+                }
+            }
+            dump_file_index();
         }
     }
 
