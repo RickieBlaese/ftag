@@ -624,26 +624,52 @@ void add_all(const tid_t &tagid, std::vector<tid_t> &tags_visited, std::unordere
     }
 }
 
-void display_tag_info(const tag_t &tag, std::vector<tid_t> &tags_visited, bool color_enabled, const show_tag_info_t &show_tag_info, bool no_formatting, bool original = false) { /* notably, does not append newline */
+enum struct chain_relation_type_t : std::uint16_t {
+    original, super, sub
+};
+
+void display_tag_info(const tag_t &tag, std::vector<tid_t> &tags_visited, bool color_enabled, const show_tag_info_t &show_tag_info, bool no_formatting, chain_relation_type_t relation, std::optional<std::uint32_t> custom_file_count = {}) { /* notably, does not append newline */
     if (std::find(tags_visited.begin(), tags_visited.end(), tag.id) == tags_visited.end()) {
         tags_visited.push_back(tag.id);
+    } else {
+        if (relation == chain_relation_type_t::original) {
+            bold_underline_out();
+        }
+        if (color_enabled && tag.color.has_value() && !no_formatting) {
+            string_color_fg(tag.color.value(), tag.name);
+        } else {
+            std::cout << tag.name;
+        }
+        if (relation == chain_relation_type_t::original) {
+            reset_out();
+        }
+        if (show_tag_info == show_tag_info_t::full_info && relation == chain_relation_type_t::original) {
+            if (custom_file_count.has_value()) {
+                std::cout << " [" << custom_file_count.value() << "]";
+            } else {
+                std::cout << " [" << tag.files.size() << "]";
+            }
+        }
+        return;
+    }
+    if (relation != chain_relation_type_t::sub && show_tag_info != show_tag_info_t::name_only) {
         std::vector<tid_t> tagsuper = enabled_only(tag.super);
-        if (show_tag_info != show_tag_info_t::name_only && !tagsuper.empty()) { /* displaying chain */
+        if (!tagsuper.empty()) {
             if (tagsuper.size() > 1) {
                 std::cout << '(';
                 for (std::uint32_t i = 0; i < tagsuper.size() - 1; i++) {
-                    display_tag_info(tags[tagsuper[i]], tags_visited, color_enabled, show_tag_info, no_formatting);
+                    display_tag_info(tags[tagsuper[i]], tags_visited, color_enabled, show_tag_info, no_formatting, chain_relation_type_t::super);
                     std::cout << " | ";
                 }
-                display_tag_info(tags[tagsuper[tagsuper.size() - 1]], tags_visited, color_enabled, show_tag_info, no_formatting);
+                display_tag_info(tags[tagsuper[tagsuper.size() - 1]], tags_visited, color_enabled, show_tag_info, no_formatting, chain_relation_type_t::super);
                 std::cout << ')';
             } else {
-                display_tag_info(tags[tagsuper[0]], tags_visited, color_enabled, show_tag_info, no_formatting);
+                display_tag_info(tags[tagsuper[0]], tags_visited, color_enabled, show_tag_info, no_formatting, chain_relation_type_t::super);
             }
             std::cout << " > ";
         }
     }
-    if (original) {
+    if (relation == chain_relation_type_t::original) {
         bold_underline_out();
     }
     if (color_enabled && tag.color.has_value() && !no_formatting) {
@@ -651,21 +677,31 @@ void display_tag_info(const tag_t &tag, std::vector<tid_t> &tags_visited, bool c
     } else {
         std::cout << tag.name;
     }
-    if (original) {
+    if (relation == chain_relation_type_t::original) {
         reset_out();
     }
-    if (show_tag_info == show_tag_info_t::full_info && original) {
-        std::cout << " [" << tag.files.size() << "]";
+    if (show_tag_info == show_tag_info_t::full_info && relation == chain_relation_type_t::original) {
+        if (custom_file_count.has_value()) {
+            std::cout << " [" << custom_file_count.value() << "]";
+        } else {
+            std::cout << " [" << tag.files.size() << "]";
+        }
+    }
+    if (relation != chain_relation_type_t::super && show_tag_info == show_tag_info_t::full_info) {
         std::vector<tid_t> tagsub = enabled_only(tag.sub);
         if (!tagsub.empty()) {
             std::cout << " > ";
-            for (std::uint32_t i = 0; i < tagsub.size() - 1; i++) {
-                std::vector<tid_t> fake_tags_visited = {tagsub[i]};
-                display_tag_info(tags[tagsub[i]], fake_tags_visited, color_enabled, show_tag_info_t::name_only, no_formatting);
-                std::cout << " | ";
+            if (tagsub.size() > 1) {
+                std::cout << '(';
+                for (std::uint32_t i = 0; i < tagsub.size() - 1; i++) {
+                    display_tag_info(tags[tagsub[i]], tags_visited, color_enabled, show_tag_info, no_formatting, chain_relation_type_t::sub);
+                    std::cout << " | ";
+                }
+                display_tag_info(tags[tagsub[tagsub.size() - 1]], tags_visited, color_enabled, show_tag_info, no_formatting, chain_relation_type_t::sub);
+                std::cout << ')';
+            } else {
+                display_tag_info(tags[tagsub[0]], tags_visited, color_enabled, show_tag_info, no_formatting, chain_relation_type_t::sub);
             }
-            std::vector<tid_t> fake_tags_visited = {tagsub[tagsub.size() - 1]};
-            display_tag_info(tags[tagsub[tagsub.size() - 1]], fake_tags_visited, color_enabled, show_tag_info_t::name_only, no_formatting);
         }
     }
 }
@@ -802,18 +838,18 @@ command flags:
             rm  <name> <flags>        : untags file(s) with tag <name>, interprets <flags> exactly like the rm command does
             edit <name> <flags>       : edits a tag
                 flags:
-                    -as,  --add-super <supername>        : adds the tag <supername> to the tag <name>'s supertags
-                    -rs,  --remove-super <supername>     : removes the tag <supername> from the tag <name>'s supertags
+                    -as,  --add-super <supername>        : adds tag <supername> to tag <name>'s supertags
+                    -rs,  --remove-super <supername>     : removes tag <supername> from tag <name>'s supertags
                     -ras, --remove-all-super             : removes all supertags from tag <name>
 
-                    -ab,  --add-sub <subname>            : forcibly make the tag <subname> descend from tag <name>
-                    -rb,  --remove-sub <subname>         : forcibly remove the tag <name> from the tag <subname>'s supertags
+                    -ab,  --add-sub <subname>            : forcibly make tag <subname> descend from tag <name>
+                    -rb,  --remove-sub <subname>         : forcibly removes tag <name> from tag <subname>'s supertags
                     -rab, --remove-all-sub               : forcibly removes tag <name> from all tags' supertags
 
-                    -c,   --color <color>                : changes the tag <name>'s hex color to <color>
-                    -rc,  --remove-color                 : removes the tag <name>'s color
+                    -c,   --color <color>                : changes tag <name>'s hex color to <color>
+                    -rc,  --remove-color                 : removes tag <name>'s color
 
-                    -n,   --rename <newname>             : renames the tag <name> to <newname>
+                    -n,   --rename <newname>             : renames tag <name> to <newname>
 
     add, rm:
         -f, --file <file OR directory> [file OR directory] ...  : adds/removes files or single directories to be tracked
@@ -821,16 +857,17 @@ command flags:
         -r, --recursive <directory> [directory] ...             : adds/removes everything in the directories (recursive)
                                                                 *** note: the rm command first tries to find the passed path in the
                                                                 *** file index simply by comparing paths, then tries to remove by
-                                                                *** the inode number found on disk. to change this behavior, see
+                                                                *** the inode number found from disk. to change this behavior, see
                                                                 *** --no-search-index
 
         -i, --inode <inum> [inum] ...                           : adds/removes inode numbers from the index
         
         --only-files                                            : only adds/removes regular files (default)
-        --only-directories                                      : only adds/removes directories,
-                                                                  including the initial <directory> passed if --recursive is used
-        --all-entries                                           : adds both regular files and directories,
-                                                                  including the initial <directory> passed if --recursive is used
+        --only-directories                                      : only adds/removes directories, including the initial <directory>
+                                                                  only has an effect with --recursive
+        --all-entries                                           : adds both regular files and directories, including the initial
+                                                                  <directory>
+                                                                  only has an effect with --recursive
 
     rm:
        --search-index                                           : searches through the index first to match paths when passed a
@@ -856,7 +893,7 @@ command flags:
         when update-ing, ftag always assumes the inode numbers stored in the file index ")" << index_filename << R"("
         and tags file ")" << tags_filename << R"(" are correct
 
-        to reassign/change the inodes in the file index and tags file, use the fix command
+        to reassign/change the inode numbers in the file index and tags file, use the fix command
 
     fix:
 
@@ -1132,7 +1169,7 @@ command flags:
                 const tag_t &tag = tags[id];
                 if (display_type == display_type_t::tags || display_type == display_type_t::tags_files) {
                     std::vector<tid_t> tags_visited;
-                    display_tag_info(tag, tags_visited, color_enabled, show_tag_info, no_formatting, true);
+                    display_tag_info(tag, tags_visited, color_enabled, show_tag_info, no_formatting, chain_relation_type_t::original);
                     if (display_type == display_type_t::tags_files) {
                         std::cout << ':';
                     }
@@ -1150,21 +1187,25 @@ command flags:
             }
 
             /* files with no tags */
-            bool showed_no_tags = false;
+            std::vector<__ino_t> files_no_tags;
             for (const auto &[file_ino, file_inc] : files_returned) {
                 if (!file_inc) { continue; }
                 if (file_index[file_ino].tags.empty()) {
-                    if (!showed_no_tags && (display_type == display_type_t::tags || display_type == display_type_t::tags_files)) {
-                        std::vector<tid_t> tags_visited;
-                        display_tag_info(tag_t{0, "(no tags)"}, tags_visited, color_enabled, show_tag_info, no_formatting, true);
-                        std::cout << ":\n";
-                        showed_no_tags = true;
-                    }
-                    display_file_info(file_index[file_ino], show_file_info, no_formatting || (display_type == display_type_t::files));
+                    files_no_tags.push_back(file_ino);
                 }
             }
-            if (showed_no_tags) {
-                std::cout << '\n';
+            if (!files_no_tags.empty()) {
+                if (display_type == display_type_t::tags || display_type == display_type_t::tags_files) {
+                    std::vector<tid_t> tags_visited;
+                    display_tag_info(tag_t{.id = 0, .name = "(no tags)"}, tags_visited, color_enabled, show_tag_info, no_formatting, chain_relation_type_t::original, files_no_tags.size());
+                    std::cout << ":\n";
+                }
+                for (const __ino_t &file_ino : files_no_tags) {
+                    display_file_info(file_index[file_ino], show_file_info, no_formatting || (display_type == display_type_t::files));
+                }
+                if (display_type == display_type_t::tags || display_type == display_type_t::tags_files) {
+                    std::cout << '\n';
+                }
             }
         } else {
             for (const auto &[file_ino, file_inc] : files_returned) {
@@ -1183,11 +1224,11 @@ command flags:
                 if (!ttags.empty()) {
                     for (std::uint32_t i = 0; i < ttags.size() - 1; i++) {
                         std::vector<tid_t> tags_visited;
-                        display_tag_info(tags[ttags[i]], tags_visited, color_enabled, show_tag_info, no_formatting, true);
+                        display_tag_info(tags[ttags[i]], tags_visited, color_enabled, show_tag_info, no_formatting, chain_relation_type_t::original);
                         std::cout << ", ";
                     }
                     std::vector<tid_t> tags_visited;
-                    display_tag_info(tags[ttags[ttags.size() - 1]], tags_visited, color_enabled, show_tag_info, no_formatting, true);
+                    display_tag_info(tags[ttags[ttags.size() - 1]], tags_visited, color_enabled, show_tag_info, no_formatting, chain_relation_type_t::original);
                 }
                 std::cout << ":\n";
                 for (const __ino_t &ofile_ino : group) {
@@ -1448,6 +1489,12 @@ command flags:
             if (!found) {
                 ERR_EXIT(1, "tag: delete: tag \"%s\" could not be deleted, was not found", name.c_str());
             }
+            for (const tid_t &id : tag.sub) {
+                tags[id].super.erase(std::remove_if(tags[id].super.begin(), tags[id].super.end(), [&tag](const tid_t &oid) -> bool { return oid == tag.id; }), tags[id].super.end());
+            }
+            for (const tid_t &id : tag.super) {
+                tags[id].sub.erase(std::remove_if(tags[id].sub.begin(), tags[id].sub.end(), [&tag](const tid_t &oid) -> bool { return oid == tag.id; }), tags[id].sub.end());
+            }
             tags.erase(tag.id);
             dump_saved_tags();
 
@@ -1614,6 +1661,15 @@ command flags:
                         ERR_EXIT(1, "tag: edit: rename flag was passed bad tag name \"%s\"", argv[3]);
                     }
                     ttag.name = newname;
+                    changed = true;
+
+                } else if (!std::strcmp(argv[i], "-c") || !std::strcmp(argv[i], "--color")) {
+                    color_t color;
+                    std::string colorstr = argv[++i];
+                    if (hex_to_rgb(colorstr, color) != 3) {
+                        ERR_EXIT(1, "tag: edit: color flag hex color \"%s\" was bad", colorstr.c_str());
+                    }
+                    ttag.color = color;
                     changed = true;
 
                 } else {
