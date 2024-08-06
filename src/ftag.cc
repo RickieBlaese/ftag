@@ -24,7 +24,7 @@
 
 #define VERSIONA 0
 #define VERSIONB 2
-#define VERSIONC 0
+#define VERSIONC 2
 #define VERSION STRINGIZE(VERSIONA) "." STRINGIZE(VERSIONB) "." STRINGIZE(VERSIONC)
 
 
@@ -238,6 +238,14 @@ std::string rgb_to_hex(const color_t &color) {
     return s.str();
 }
 
+bool tag_name_bad(const std::string &tname) {
+    bool name_bad = (tname[0] == '-');
+    for (const char &c : tname) {
+        name_bad = name_bad || (c == ' ' || c == '(' || c == ')' || c == '[' || c == ']' || c == ':');
+    }
+    return name_bad;
+}
+
 
 /* loops in the tag graph are discouraged but are allowed, including a tag having a supertag be itself */
 
@@ -377,11 +385,7 @@ void read_saved_tags() {
                 ERR_EXIT(1, "tag file \"%s\" line %i had empty tag name", tags_filename.c_str(), i + 1);
             }
             /* check if tname is good */
-            bool name_bad = (tname[0] == '-');
-            for (const char &c : tname) {
-                name_bad = name_bad || (c == ' ' || c == '(' || c == ')' || c == '[' || c == ']' || c == ':');
-            }
-            if (name_bad) {
+            if (tag_name_bad(tname)) {
                 ERR_EXIT(1, "tag file \"%s\" line %i had bad tag name: \"%s\"", tags_filename.c_str(), i + 1, tname.c_str());
             }
             current_tag.value().name = tname;
@@ -642,7 +646,7 @@ void display_tag_info(const tag_t &tag, std::vector<tid_t> &tags_visited, bool c
     if (original) {
         bold_underline_out();
     }
-    if (color_enabled && tag.color.has_value() && (!no_formatting && show_tag_info != show_tag_info_t::name_only)) {
+    if (color_enabled && tag.color.has_value() && !no_formatting) {
         string_color_fg(tag.color.value(), tag.name);
     } else {
         std::cout << tag.name;
@@ -698,13 +702,13 @@ void display_file_info(const file_info_t &file_info, const show_file_info_t &sho
 
 
 
-int main(int argc, char **argv) {
+int main(int argc, char **argv) { /* NOLINT */
     config_directory = std::getenv("HOME") + config_directory;
     index_filename = config_directory + index_filename;
     tags_filename = config_directory + tags_filename;
 
     if (argc <= 1) {
-        WARN("no action provided, try %s --help for more information", argv[0]);
+        WARN("no action provided, see %s --help for more information", argv[0]);
         return 1;
     }
 
@@ -790,29 +794,26 @@ command flags:
 
     tag:
         subcommands:
-            create <name> [color]     : creates a tag with the name <name> and hex color [color]
-            delete <name>             : deletes a tag with the name <name>
-            enable <name>             : enables a tag with the name <name>
+            create  <name> [color]    : creates a tag with the name <name> and hex color [color]
+            delete  <name>            : deletes a tag with the name <name>
+            enable  <name>            : enables a tag with the name <name>
             disable <name>            : disables a tag with the name <name>
+            add <name> <flags>        : tags file(s) with tag <name>, interprets <flags> exactly like the add command does
+            rm  <name> <flags>        : untags file(s) with tag <name>, interprets <flags> exactly like the rm command does
             edit <name> <flags>       : edits a tag
                 flags:
                     -as,  --add-super <supername>        : adds the tag <supername> to the tag <name>'s supertags
                     -rs,  --remove-super <supername>     : removes the tag <supername> from the tag <name>'s supertags
-                                                           (errors if tag <supername> is not in tag <name>'s supertags)
-                    -rsq, --remove-super-q <supername>   : same as --remove-super, except it does not error and is silent
                     -ras, --remove-all-super             : removes all supertags from tag <name>
 
                     -ab,  --add-sub <subname>            : forcibly make the tag <subname> descend from tag <name>
                     -rb,  --remove-sub <subname>         : forcibly remove the tag <name> from the tag <subname>'s supertags
-                                                           (errors if tag <name> is not in tag <subname>'s supertags)
-                    -rbq, --remove-sub-q <subname>       : same as --remove-sub, except it does not error and is silent
                     -rab, --remove-all-sub               : forcibly removes tag <name> from all tags' supertags
 
                     -c,   --color <color>                : changes the tag <name>'s hex color to <color>
                     -rc,  --remove-color                 : removes the tag <name>'s color
 
-                    -e,   --enable                       : enables the tag <name>
-                    -d,   --disable                      : enables the tag <name>
+                    -n,   --rename <newname>             : renames the tag <name> to <newname>
 
     add, rm:
         -f, --file <file OR directory> [file OR directory] ...  : adds/removes files or single directories to be tracked
@@ -875,6 +876,7 @@ command flags:
     bool is_rm = !std::strcmp(argv[1], "rm");
     bool is_update = !std::strcmp(argv[1], "update");
     bool is_fix = !std::strcmp(argv[1], "fix");
+    bool is_tag = !std::strcmp(argv[1], "tag");
 
     read_file_index();
     read_saved_tags();
@@ -954,7 +956,7 @@ command flags:
                     has_opt = true;
                     main_arg = targ.substr(2, targ.size() - 4);
                     if (targ[targ.size() - 2] != '-') {
-                        ERR_EXIT(1, "argument %i not recognized: \"%s\"", i, argv[i]);
+                        ERR_EXIT(1, "search: argument %i not recognized: \"%s\"", i, argv[i]);
                     }
                 }
             } else if (targ[0] == '-') {
@@ -965,7 +967,7 @@ command flags:
                 }
             }
             if (!arg_to_rule_type.contains(main_arg)) {
-                ERR_EXIT(1, "argument %i not recognized: \"%s\"", i, argv[i]);
+                ERR_EXIT(1, "search: argument %i not recognized: \"%s\"", i, argv[i]);
             }
             search_rule_type_t rule_type = arg_to_rule_type.find(main_arg)->second;
             std::string opt;
@@ -973,12 +975,12 @@ command flags:
             if (has_opt) {
                 opt = targ.substr(targ.size() - 1, 1);
                 if (!arg_to_opt.contains(opt)) {
-                    ERR_EXIT(1, "argument %i search option \"%s\" not found", i, opt.c_str());
+                    ERR_EXIT(1, "search: argument %i search option \"%s\" not found", i, opt.c_str());
                 }
                 sopt = arg_to_opt.find(opt)->second;
             }
             if (i >= argc - 1 && rule_type != search_rule_type_t::all_list && rule_type != search_rule_type_t::all_list_exclude) {
-                ERR_EXIT(1, "expected argument <text> after \"%s\"", targ.c_str());
+                ERR_EXIT(1, "search: expected argument <text> after \"%s\"", targ.c_str());
             }
             if (rule_type == search_rule_type_t::all_list || rule_type == search_rule_type_t::all_list_exclude) {
                 search_rules.push_back(search_rule_t{rule_type});
@@ -1242,14 +1244,14 @@ command flags:
             if (!std::strcmp(argv[i], "-f") || !std::strcmp(argv[i], "--file")) {
                 i++;
                 if (i >= argc) {
-                    ERR_EXIT(1, "expected at least one file/directory after file flag");
+                    ERR_EXIT(1, "%s: expected at least one file/directory after file flag", argv[1]);
                 }
                 for (; i < argc; i++) {
                     if (argv[i][0] == '-') {
-                        WARN("argument %i file/directory \"%s\" began with '-', interpreting as a file, you cannot pass another flag", i, argv[i]);
+                        WARN("%s: argument %i file/directory \"%s\" began with '-', interpreting as a file, you cannot pass another flag", argv[1], i, argv[i]);
                     }
                     if (!path_ok(argv[i])) {
-                        ERR_EXIT(1, "argument %i file/directory \"%s\" could not construct path", i, argv[i]);
+                        ERR_EXIT(1, "%s: argument %i file/directory \"%s\" could not construct path", argv[1], i, argv[i]);
                     }
 
                     const std::filesystem::path tpath = std::filesystem::weakly_canonical(argv[i]);
@@ -1260,14 +1262,14 @@ command flags:
             } else if (!std::strcmp(argv[i], "-r") || !std::strcmp(argv[i], "--recursive")) {
                 i++;
                 if (i >= argc) {
-                    ERR_EXIT(1, "expected at least one directory after recursive flag");
+                    ERR_EXIT(1, "%s: expected at least one directory after recursive flag", argv[1]);
                 }
                 for (; i < argc; i++) {
                     if (argv[i][0] == '-') {
-                        WARN("argument %i directory \"%s\" began with '-', interpreting as a directory, you cannot pass another flag", i, argv[i]);
+                        WARN("%s: argument %i directory \"%s\" began with '-', interpreting as a directory, you cannot pass another flag", argv[1], i, argv[i]);
                     }
                     if (!path_ok(argv[i])) {
-                        ERR_EXIT(1, "argument %i directory \"%s\" could not construct path", i, argv[i]);
+                        ERR_EXIT(1, "%s: argument %i directory \"%s\" could not construct path", argv[1], i, argv[i]);
                     }
 
                     const std::filesystem::path tpath(argv[i]);
@@ -1276,11 +1278,11 @@ command flags:
                 }
             } else if (!std::strcmp(argv[i], "-i") || !std::strcmp(argv[i], "--inode")) {
                 if (is_update) {
-                    ERR_EXIT(1, "cannot update from inode numbers, specify files or directories with the appropriate flags, read the update command section of %s --help for more info", argv[0]);
+                    ERR_EXIT(1, "%s: cannot update from inode numbers, specify files or directories with the appropriate flags, read the update command section of %s --help for more info", argv[1], argv[0]);
                 }
                 i++;
                 if (i >= argc) {
-                    ERR_EXIT(1, "expected at least one inode number after inode flag");
+                    ERR_EXIT(1, "%s: expected at least one inode number after inode flag", argv[1]);
                 }
                 for (; i < argc; i++) {
                     if (argv[i][0] == '-') {
@@ -1289,7 +1291,7 @@ command flags:
                     }
                     __ino_t file_ino = std::strtoul(argv[i], nullptr, 0);
                     if (file_ino == 0) {
-                        ERR_EXIT(1, "argument %i inode number \"%s\" was not valid", i, argv[i]);
+                        ERR_EXIT(1, "%s: argument %i inode number \"%s\" was not valid", argv[1], i, argv[i]);
                     }
                     to_change.push_back(change_rule_t{"", change_rule_type_t::inode_number, file_ino});
                 }
@@ -1304,7 +1306,7 @@ command flags:
             } else if (!std::strcmp(argv[i], "--all-entries")) {
                 change_entry_type = change_entry_type_t::all_entries;
             } else {
-                ERR_EXIT(1, "flag \"%s\" was not recognized", argv[i]);
+                ERR_EXIT(1, "%s: flag \"%s\" was not recognized", argv[1], argv[i]);
             }
 
         }
@@ -1316,16 +1318,16 @@ command flags:
             if (change_rule.type == change_rule_type_t::single_file) {
                 if (is_add) {
                     if (!std::filesystem::exists(change_rule.path)) {
-                        ERR_EXIT(1, "file/directory \"%s\" could not be added, does not exist", change_rule.path.c_str());
+                        ERR_EXIT(1, "add: file/directory \"%s\" could not be added, does not exist", change_rule.path.c_str());
                     }
 
                     if (!std::filesystem::is_regular_file(change_rule.path) && !std::filesystem::is_directory(change_rule.path)) {
-                        WARN("file/directory \"%s\" could not be added, exists but was not a regular file or directory", change_rule.path.c_str());
+                        WARN("%s: file/directory \"%s\" could not be added, exists but was not a regular file or directory", argv[1], change_rule.path.c_str());
                         continue;
                     }
                     __ino_t file_ino = path_get_ino(change_rule.path);
                     if (file_index.contains(file_ino)) {
-                        WARN("file/directory \"%s\" could not be added, inode number %lu already exists in file index with path \"%s\", you might want to run update on it, skipping", change_rule.path.c_str(), file_ino, file_index[file_ino].pathstr.c_str());
+                        WARN("%s: file/directory \"%s\" could not be added, inode number %lu already exists in file index with path \"%s\", you might want to run update on it, skipping", argv[1], change_rule.path.c_str(), file_ino, file_index[file_ino].pathstr.c_str());
                         continue;
                     }
                     file_index[file_ino] = file_info_t{file_ino, change_rule.path};
@@ -1343,9 +1345,9 @@ command flags:
                     file_ino = search_use_fs(change_rule.path);
                     if (file_ino == 0) {
                         if (search_index_first) {
-                            WARN("file/directory \"%s\" could not be removed, searched both by path in file index and by its inode number (from disk) and was not found", change_rule.path.c_str());
+                            WARN("%s: file/directory \"%s\" could not be removed, searched both by path in file index and by its inode number (from disk) and was not found", argv[1], change_rule.path.c_str());
                         } else {
-                            WARN("file/directory \"%s\" could not be removed, searched by its inode number (from disk) and was not found", change_rule.path.c_str());
+                            WARN("%s: file/directory \"%s\" could not be removed, searched by its inode number (from disk) and was not found", argv[1], change_rule.path.c_str());
                         }
                         continue;
                     }
@@ -1353,7 +1355,7 @@ command flags:
                     changed = true;
                 } else if (is_update) {
                     if (!std::filesystem::exists(change_rule.path)) {
-                        ERR_EXIT(1, "file/directory \"%s\" could not be updated, does not exist", change_rule.path.c_str());
+                        ERR_EXIT(1, "update: file/directory \"%s\" could not be updated, does not exist", change_rule.path.c_str());
                     }
                     __ino_t file_ino = path_get_ino(change_rule.path);
                     if (file_index.contains(file_ino)) {
@@ -1364,7 +1366,7 @@ command flags:
 
             } else if (change_rule.type == change_rule_type_t::recursive) {
                 if (!std::filesystem::is_directory(change_rule.path)) {
-                    ERR_EXIT(1, "directory \"%s\" was not a directory, could not walk recursively", change_rule.path.c_str());
+                    ERR_EXIT(1, "%s: directory \"%s\" was not a directory, could not walk recursively", argv[1], change_rule.path.c_str());
                 }
                 if (change_entry_type == change_entry_type_t::only_directories || change_entry_type == change_entry_type_t::all_entries) {
                     to_change.insert(to_change.begin() + ci+1, change_rule_t{change_rule.path, change_rule_type_t::single_file});
@@ -1376,13 +1378,13 @@ command flags:
             } else if (change_rule.type == change_rule_type_t::inode_number) {
                 if (is_rm) {
                     if (!file_index.contains(change_rule.file_ino)) {
-                        ERR_EXIT(1, "inode number %lu could not be removed, was not found in file index", change_rule.file_ino);
+                        ERR_EXIT(1, "%s: inode number %lu could not be removed, was not found in file index", argv[1], change_rule.file_ino);
                     }
                     file_index.erase(change_rule.file_ino);
                     changed = true;
                 } else if (is_add) {
                     if (file_index.contains(change_rule.file_ino)) {
-                        WARN("inode number %lu could not be added, already exists in file index with path \"%s\"", change_rule.file_ino, file_index[change_rule.file_ino].pathstr.c_str());
+                        WARN("%s: inode number %lu could not be added, already exists in file index with path \"%s\"", argv[1], change_rule.file_ino, file_index[change_rule.file_ino].pathstr.c_str());
                         continue;
                     }
                     file_index[change_rule.file_ino] = file_info_t{change_rule.file_ino};
@@ -1396,6 +1398,228 @@ command flags:
 
     } else if (is_fix) {
 
+    } else if (is_tag) {
+        if (argc < 3) {
+            ERR_EXIT(1, "tag: expected a subcommand, see %s --help for more information", argv[0]);
+        }
+        
+        const auto tag_by_name = [](const std::string &name, bool &found) -> tag_t& {
+            static tag_t temp; /* bs */
+            for (auto &[_, tag] : tags) {
+                if (tag.name == name) {
+                    found = true;
+                    return tag;
+                }
+            }
+            return temp;
+        };
+
+        std::string subcommand = argv[2];
+        if (subcommand == "create") {
+            if (argc < 4) {
+                ERR_EXIT(1, "tag: create: expected argument <name>");
+            }
+            std::optional<color_t> color;
+            if (argc > 4) {
+                color = color_t{};
+                if (hex_to_rgb(argv[4], color.value()) != 3) {
+                    ERR_EXIT(1, "tag: create: hex color \"%s\" was bad", argv[4]);
+                }
+            }
+            tid_t tagid = generate_unique_tid();
+            if (tag_name_bad(argv[3])) {
+                ERR_EXIT(1, "tag: create: bad tag name \"%s\"", argv[3]);
+            }
+            tags[tagid] = tag_t{tagid, argv[3], color};
+            dump_saved_tags();
+
+        } else if (subcommand == "delete") {
+            if (argc < 4) {
+                ERR_EXIT(1, "tag: delete: expected argument <name>");
+            }
+            std::string name = argv[3];
+            bool found = false;
+            tag_t &tag = tag_by_name(name, found);
+            if (!found) {
+                ERR_EXIT(1, "tag: delete: tag \"%s\" could not be deleted, was not found", name.c_str());
+            }
+            tags.erase(tag.id);
+            dump_saved_tags();
+
+        } else if (subcommand == "enable") {
+            if (argc < 4) {
+                ERR_EXIT(1, "tag: enable: expected argument <name>");
+            }
+            std::string name = argv[3];
+            bool found = false;
+            tag_t &tag = tag_by_name(name, found);
+            if (!found) {
+                ERR_EXIT(1, "tag: enable: tag \"%s\" could not be enabled, was not found", name.c_str());
+            }
+            tag.enabled = true;
+            dump_saved_tags();
+
+        } else if (subcommand == "disable") {
+            if (argc < 4) {
+                ERR_EXIT(1, "tag: disable: expected argument <name>");
+            }
+            std::string name = argv[3];
+            bool found = false;
+            tag_t &tag = tag_by_name(name, found);
+            if (!found) {
+                ERR_EXIT(1, "tag: disable: tag \"%s\" could not be disabled, was not found", name.c_str());
+            }
+            tag.enabled = false;
+            dump_saved_tags();
+
+        } else if (subcommand == "edit") {
+            if (argc < 5) {
+                ERR_EXIT(1, "tag: edit: expected arguments <name> <flags>");
+            }
+            std::string name = argv[3];
+            bool found = false;
+            tag_t &ttag = tag_by_name(name, found);
+            if (!found) {
+                ERR_EXIT(1, "tag: edit: tag \"%s\" could not be edited, was not found", name.c_str());
+            }
+            bool changed = false;
+            for (std::uint32_t i = 4; i < argc; i++) {
+                if (!std::strcmp(argv[i], "-ras") || !std::strcmp(argv[i], "--remove-all-super")) {
+                    for (const tid_t &id : ttag.super) {
+                        tags[id].sub.erase(std::remove_if(tags[id].sub.begin(), tags[id].sub.end(), [&ttag](const tid_t &oid) -> bool { return oid == ttag.id; }), tags[id].sub.end());
+                    }
+                    ttag.super.clear();
+                    changed = true;
+
+                } else if (!std::strcmp(argv[i], "-rab") || !std::strcmp(argv[i], "--remove-all-sub")) {
+                    for (const tid_t &id : ttag.sub) {
+                        tags[id].super.erase(std::remove_if(tags[id].super.begin(), tags[id].super.end(), [&ttag](const tid_t &oid) -> bool { return oid == ttag.id; }), tags[id].super.end());
+                    }
+                    ttag.sub.clear();
+                    changed = true;
+
+                } else if (!std::strcmp(argv[i], "-rc") || !std::strcmp(argv[i], "--remove-color")) {
+                    ttag.color.reset();
+                    changed = true;
+
+                } else if (!std::strcmp(argv[i], "-as") || !std::strcmp(argv[i], "--add-super")) {
+                    if (i >= argc - 1) {
+                        ERR_EXIT(1, "tag: edit: add super flag expected argument <supername>");
+                    }
+                    std::string supername = argv[++i];
+                    bool found = false;
+                    tag_t &tag = tag_by_name(supername, found);
+                    if (!found) {
+                        WARN("tag: edit: tag \"%s\" could not be added as a supertag to tag \"%s\", the first was not found, skipping", tag.name.c_str(), ttag.name.c_str());
+                        continue;
+                    }
+                    bool already_super = std::find(ttag.super.begin(), ttag.super.end(), tag.id) != ttag.super.end();
+                    bool already_sub = std::find(tag.sub.begin(), tag.sub.end(), ttag.id) != tag.sub.end();
+                    if (already_sub || already_super) {
+                        WARN("tag: edit: tag \"%s\" was already a supertag of tag \"%s\"", tag.name.c_str(), ttag.name.c_str());
+                    }
+                    if (!already_super) {
+                        ttag.super.push_back(tag.id);
+                    }
+                    if (!already_sub) {
+                        tag.sub.push_back(ttag.id);
+                    }
+                    changed = true;
+
+                } else if (!std::strcmp(argv[i], "-rs") || !std::strcmp(argv[i], "--remove-super")) {
+                    if (i >= argc - 1) {
+                        ERR_EXIT(1, "tag: edit: remove super flag expected argument <supername>");
+                    }
+                    std::string supername = argv[++i];
+                    bool found = false;
+                    tag_t &tag = tag_by_name(supername, found);
+                    if (!found) {
+                        WARN("tag: edit: tag \"%s\" could not be removed as a supertag from tag \"%s\", the first was not found, skipping", tag.name.c_str(), ttag.name.c_str());
+                        continue;
+                    }
+                    bool already_super = std::find(ttag.super.begin(), ttag.super.end(), tag.id) == ttag.super.end();
+                    bool already_sub = std::find(tag.sub.begin(), tag.sub.end(), ttag.id) == tag.sub.end();
+                    if (already_sub && already_super) {
+                        WARN("tag: edit: tag \"%s\" was not a supertag of tag \"%s\", skipping", tag.name.c_str(), ttag.name.c_str());
+                        continue;
+                    }
+                    if (!already_super) {
+                        ttag.super.erase(std::remove_if(ttag.super.begin(), ttag.super.end(), [&tag](const tid_t &oid) -> bool { return oid == tag.id; }), ttag.super.end());
+                    }
+                    if (!already_sub) {
+                        tag.sub.erase(std::remove_if(tag.sub.begin(), tag.sub.end(), [&ttag](const tid_t &oid) -> bool { return oid == ttag.id; }), tag.sub.end());
+                    }
+                    changed = true;
+
+                } else if (!std::strcmp(argv[i], "-ab") || !std::strcmp(argv[i], "--add-sub")) {
+                    if (i >= argc - 1) {
+                        ERR_EXIT(1, "tag: edit: add sub flag expected argument <subname>");
+                    }
+                    std::string subname = argv[++i];
+                    bool found = false;
+                    tag_t &tag = tag_by_name(subname, found);
+                    if (!found) {
+                        WARN("tag: edit: tag \"%s\" could not be added as a subtag to tag \"%s\", the first was not found, skipping", tag.name.c_str(), ttag.name.c_str());
+                        continue;
+                    }
+                    bool already_super = std::find(tag.super.begin(), tag.super.end(), ttag.id) != tag.super.end();
+                    bool already_sub = std::find(ttag.sub.begin(), ttag.sub.end(), tag.id) != ttag.sub.end();
+                    if (already_sub || already_super) {
+                        WARN("tag: edit: tag \"%s\" was already a subtag of tag \"%s\"", tag.name.c_str(), ttag.name.c_str());
+                    }
+                    if (!already_super) {
+                        tag.super.push_back(ttag.id);
+                    }
+                    if (!already_sub) {
+                        ttag.sub.push_back(tag.id);
+                    }
+                    changed = true;
+
+                } else if (!std::strcmp(argv[i], "-rb") || !std::strcmp(argv[i], "--remove-sub")) {
+                    if (i >= argc - 1) {
+                        ERR_EXIT(1, "tag: edit: remove sub flag expected argument <subname>");
+                    }
+                    std::string subname = argv[++i];
+                    bool found = false;
+                    tag_t &tag = tag_by_name(subname, found);
+                    if (!found) {
+                        WARN("tag: edit: tag \"%s\" could not be removed as a subtag from tag \"%s\", the first was not found, skipping", tag.name.c_str(), ttag.name.c_str());
+                        continue;
+                    }
+                    bool already_super = std::find(tag.super.begin(), tag.super.end(), ttag.id) == tag.super.end();
+                    bool already_sub = std::find(ttag.sub.begin(), ttag.sub.end(), tag.id) == ttag.sub.end();
+                    if (already_sub && already_super) {
+                        WARN("tag: edit: tag \"%s\" was not a subtag of tag \"%s\", skipping", tag.name.c_str(), ttag.name.c_str());
+                        continue;
+                    }
+                    if (!already_super) {
+                        tag.super.erase(std::remove_if(tag.super.begin(), tag.super.end(), [&ttag](const tid_t &oid) -> bool { return oid == ttag.id; }), tag.super.end());
+                    }
+                    if (!already_sub) {
+                        ttag.sub.erase(std::remove_if(ttag.sub.begin(), ttag.sub.end(), [&tag](const tid_t &oid) -> bool { return oid == tag.id; }), ttag.sub.end());
+                    }
+                    changed = true;
+
+                } else if (!std::strcmp(argv[i], "-n") || !std::strcmp(argv[i], "--rename")) {
+                    if (i >= argc - 1) {
+                        ERR_EXIT(1, "tag: edit: rename flag expected argument <newname>");
+                    }
+                    std::string newname = argv[++i];
+                    if (tag_name_bad(newname)) {
+                        ERR_EXIT(1, "tag: edit: rename flag was passed bad tag name \"%s\"", argv[3]);
+                    }
+                    ttag.name = newname;
+                    changed = true;
+
+                }
+
+            }
+            if (changed) {
+                dump_saved_tags();
+            }
+        } else {
+            ERR_EXIT(1, "tag: subcommand \"%s\" was not recognized", subcommand.c_str());
+        }
     } else {
         ERR_EXIT(1, "command \"%s\" was not recognized", argv[1]);
     }
