@@ -654,7 +654,7 @@ void display_tag_info(const tag_t &tag, std::vector<tid_t> &tags_visited, bool c
     if (original) {
         reset_out();
     }
-    if (show_tag_info == show_tag_info_t::full_info) {
+    if (show_tag_info == show_tag_info_t::full_info && original) {
         std::cout << " [" << tag.files.size() << "]";
         std::vector<tid_t> tagsub = enabled_only(tag.sub);
         if (!tagsub.empty()) {
@@ -689,9 +689,9 @@ void display_file_info(const file_info_t &file_info, const show_file_info_t &sho
         }
     } else {
         if (show_file_info == show_file_info_t::full_path) {
-            std::cout << file_info.pathstr;
+            std::cout << std::filesystem::path(file_info.pathstr);
         } else if (show_file_info == show_file_info_t::full_info) {
-            std::cout << file_info.filename() << " (" << file_info.file_ino << "): " << file_info.pathstr;
+            std::cout << file_info.filename() << " (" << file_info.file_ino << "): " << std::filesystem::path(file_info.pathstr);
         } else {
             std::cout << file_info.filename();
         }
@@ -1133,15 +1133,20 @@ command flags:
                 if (display_type == display_type_t::tags || display_type == display_type_t::tags_files) {
                     std::vector<tid_t> tags_visited;
                     display_tag_info(tag, tags_visited, color_enabled, show_tag_info, no_formatting, true);
+                    if (display_type == display_type_t::tags_files) {
+                        std::cout << ':';
+                    }
+                    std::cout << '\n';
                 }
                 if (display_type == display_type_t::files || display_type == display_type_t::tags_files) {
-                    std::cout << ":\n";
                     for (const __ino_t &file_ino : tag.files) {
                         if (!files_returned[file_ino]) { continue; }
-                        display_file_info(file_index[file_ino], show_file_info, no_formatting);
+                        display_file_info(file_index[file_ino], show_file_info, no_formatting || (display_type == display_type_t::files));
+                    }
+                    if (display_type == display_type_t::tags_files) {
+                        std::cout << '\n';
                     }
                 }
-                std::cout << '\n';
             }
 
             /* files with no tags */
@@ -1149,13 +1154,13 @@ command flags:
             for (const auto &[file_ino, file_inc] : files_returned) {
                 if (!file_inc) { continue; }
                 if (file_index[file_ino].tags.empty()) {
-                    if (!showed_no_tags) {
+                    if (!showed_no_tags && (display_type == display_type_t::tags || display_type == display_type_t::tags_files)) {
                         std::vector<tid_t> tags_visited;
                         display_tag_info(tag_t{0, "(no tags)"}, tags_visited, color_enabled, show_tag_info, no_formatting, true);
                         std::cout << ":\n";
                         showed_no_tags = true;
                     }
-                    display_file_info(file_index[file_ino], show_file_info, no_formatting);
+                    display_file_info(file_index[file_ino], show_file_info, no_formatting || (display_type == display_type_t::files));
                 }
             }
             if (showed_no_tags) {
@@ -1611,12 +1616,16 @@ command flags:
                     ttag.name = newname;
                     changed = true;
 
+                } else {
+                    ERR_EXIT(1, "tag: edit: flag \"%s\" was not recognized", argv[i]);
                 }
 
             }
             if (changed) {
                 dump_saved_tags();
             }
+        } else if (subcommand == "add") {
+
         } else {
             ERR_EXIT(1, "tag: subcommand \"%s\" was not recognized", subcommand.c_str());
         }
