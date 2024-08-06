@@ -59,6 +59,7 @@
 #endif
 
 
+
 template <typename T>
 T get_random_int() {
     static std::random_device device{};
@@ -75,7 +76,7 @@ bool file_exists(const std::string &filename, struct stat *pbuffer = nullptr) {
     }
 }
 
-__ino_t path_get_ino(const std::filesystem::path &path) {
+ino_t path_get_ino(const std::filesystem::path &path) {
     struct stat buffer{};
     stat(path.c_str(), &buffer);
     return buffer.st_ino;
@@ -117,12 +118,12 @@ struct tag_t {
     std::optional<color_t> color;
     std::vector<tid_t> sub;
     std::vector<tid_t> super;
-    std::vector<__ino_t> files; /* file inode numbers */
+    std::vector<ino_t> files; /* file inode numbers */
     bool enabled = true;
 };
 
 struct file_info_t {
-    __ino_t file_ino;
+    ino_t file_ino;
     std::string pathstr;
     std::vector<tid_t> tags;
 
@@ -225,7 +226,7 @@ std::string config_directory = "/.config/ftag/"; /* NOLINT */
 std::string tags_filename = "main.tags"; /* NOLINT */
 std::string index_filename = ".fileindex"; /* NOLINT */
 
-std::map<__ino_t, file_info_t> file_index; /* NOLINT */
+std::map<ino_t, file_info_t> file_index; /* NOLINT */
 
 std::int32_t hex_to_rgb(const std::string &s, color_t &color) {
     return sscanf(s.c_str(), "%2hx%2hx%2hx", &color.r, &color.g, &color.b); /* NOLINT */
@@ -306,7 +307,7 @@ void read_saved_tags() {
                 ERR_EXIT(1, "tag file \"%s\" line %i had \"-[file inode number]\" under no active tag", tags_filename.c_str(), i + 1);
             }
             std::string file_ino_str = no_whitespace_line.substr(1);
-            __ino_t file_ino = std::strtoul(file_ino_str.c_str(), nullptr, 0);
+            ino_t file_ino = std::strtoul(file_ino_str.c_str(), nullptr, 0);
             if (file_ino == 0) {
                 ERR_EXIT(1, "tag file \"%s\" line %i had bad file inode number: \"%s\"", tags_filename.c_str(), i + 1, file_ino_str.c_str());
             }
@@ -473,7 +474,7 @@ void dump_saved_tags() {
             }
         }
         file << '\n';
-        for (const __ino_t &file_ino : tag.files) {
+        for (const ino_t &file_ino : tag.files) {
             file << '-' << file_ino << '\n';
         }
     }
@@ -505,7 +506,7 @@ void read_file_index() {
         std::vector<std::string> sections;
         sections.reserve(2);
         split(line, ":", sections, 2); /* guaranteed at least size 2 from earlier ':' check */
-        __ino_t file_ino = std::strtoul(sections[0].c_str(), nullptr, 0);
+        ino_t file_ino = std::strtoul(sections[0].c_str(), nullptr, 0);
         if (file_ino == 0) {
             ERR_EXIT(1, "index file \"%s\" line %i had bad file inode number \"%s\"", index_filename.c_str(), i, sections[0].c_str());
         }
@@ -608,15 +609,15 @@ enum struct change_rule_type_t : std::uint16_t {
 struct change_rule_t {
     std::filesystem::path path;
     change_rule_type_t type;
-    __ino_t file_ino = 0;
+    ino_t file_ino = 0;
 };
 
-void add_all(const tid_t &tagid, std::vector<tid_t> &tags_visited, std::unordered_map<tid_t, bool> &tags_map, std::unordered_map<__ino_t, bool> &files_map, bool exclude) {
+void add_all(const tid_t &tagid, std::vector<tid_t> &tags_visited, std::unordered_map<tid_t, bool> &tags_map, std::unordered_map<ino_t, bool> &files_map, bool exclude) {
     for (const tid_t &id : enabled_only(tags[tagid].sub)) {
         if (std::find(tags_visited.begin(), tags_visited.end(), id) == tags_visited.end()) {
             tags_visited.push_back(id);
             tags_map[id] = !exclude;
-            for (const __ino_t &file_ino : tags[id].files) {
+            for (const ino_t &file_ino : tags[id].files) {
                 files_map[file_ino] = !exclude;
             }
             add_all(id, tags_visited, tags_map, files_map, exclude);
@@ -1032,7 +1033,7 @@ command flags:
         for (const auto &[id, _] : tags) {
             tags_returned[id] = false;
         }
-        std::unordered_map<__ino_t, bool> files_returned;
+        std::unordered_map<ino_t, bool> files_returned;
         for (const auto &[file_ino, _] : file_index) {
             files_returned[file_ino] = false;
         }
@@ -1070,7 +1071,7 @@ command flags:
                         if (!tag.enabled) { continue; }
                         if (tag.name == search_rule.text) {
                             tags_returned[id] = !exclude;
-                            for (const __ino_t &file_ino : tag.files) {
+                            for (const ino_t &file_ino : tag.files) {
                                 files_returned[file_ino] = !exclude;
                             }
                         }
@@ -1103,7 +1104,7 @@ command flags:
                         if (!tag.enabled) { continue; }
                         if (tag.name.find(search_rule.text) != std::string::npos) {
                             tags_returned[id] = !exclude;
-                            for (const __ino_t &file_ino : tag.files) {
+                            for (const ino_t &file_ino : tag.files) {
                                 files_returned[file_ino] = !exclude;
                             }
                         }
@@ -1137,7 +1138,7 @@ command flags:
                         if (!tag.enabled) { continue; }
                         if (std::regex_search(tag.name, rg)) {
                             tags_returned[id] = !exclude;
-                            for (const __ino_t &file_ino : tag.files) {
+                            for (const ino_t &file_ino : tag.files) {
                                 files_returned[file_ino] = !exclude;
                             }
                         }
@@ -1176,7 +1177,7 @@ command flags:
                     std::cout << '\n';
                 }
                 if (display_type == display_type_t::files || display_type == display_type_t::tags_files) {
-                    for (const __ino_t &file_ino : tag.files) {
+                    for (const ino_t &file_ino : tag.files) {
                         if (!files_returned[file_ino]) { continue; }
                         display_file_info(file_index[file_ino], show_file_info, no_formatting || (display_type == display_type_t::files));
                     }
@@ -1187,7 +1188,7 @@ command flags:
             }
 
             /* files with no tags */
-            std::vector<__ino_t> files_no_tags;
+            std::vector<ino_t> files_no_tags;
             for (const auto &[file_ino, file_inc] : files_returned) {
                 if (!file_inc) { continue; }
                 if (file_index[file_ino].tags.empty()) {
@@ -1200,7 +1201,7 @@ command flags:
                     display_tag_info(tag_t{.id = 0, .name = "(no tags)"}, tags_visited, color_enabled, show_tag_info, no_formatting, chain_relation_type_t::original, files_no_tags.size());
                     std::cout << ":\n";
                 }
-                for (const __ino_t &file_ino : files_no_tags) {
+                for (const ino_t &file_ino : files_no_tags) {
                     display_file_info(file_index[file_ino], show_file_info, no_formatting || (display_type == display_type_t::files));
                 }
                 if (display_type == display_type_t::tags || display_type == display_type_t::tags_files) {
@@ -1210,7 +1211,7 @@ command flags:
         } else {
             for (const auto &[file_ino, file_inc] : files_returned) {
                 if (!file_inc) { continue; }
-                std::vector<__ino_t> group = {file_ino};
+                std::vector<ino_t> group = {file_ino};
                 std::vector<tid_t> ttags = enabled_only(file_index[file_ino].tags);
                 std::sort(ttags.begin(), ttags.end());
                 for (const auto &[ofile_ino, ofile_inc] : files_returned) {
@@ -1231,7 +1232,7 @@ command flags:
                     display_tag_info(tags[ttags[ttags.size() - 1]], tags_visited, color_enabled, show_tag_info, no_formatting, chain_relation_type_t::original);
                 }
                 std::cout << ":\n";
-                for (const __ino_t &ofile_ino : group) {
+                for (const ino_t &ofile_ino : group) {
                     display_file_info(file_index[ofile_ino], show_file_info, no_formatting);
                 }
             }
@@ -1264,7 +1265,7 @@ command flags:
             return true;
         };
 
-        const auto search_index = [&path_ok](const std::filesystem::path &tpath) -> __ino_t {
+        const auto search_index = [&path_ok](const std::filesystem::path &tpath) -> ino_t {
             for (const auto &[file_ino, file_info] : file_index) {
                 if (path_ok(file_info.pathstr)) {
                     std::filesystem::path opath = std::filesystem::weakly_canonical(file_info.pathstr);
@@ -1276,7 +1277,7 @@ command flags:
             return 0;
         };
 
-        const auto search_use_fs = [](const std::filesystem::path &tpath) -> __ino_t {
+        const auto search_use_fs = [](const std::filesystem::path &tpath) -> ino_t {
             struct stat buf{};
             if (file_exists(tpath.string(), &buf)) {
                 if (file_index.contains(buf.st_ino)) {
@@ -1335,7 +1336,7 @@ command flags:
                         i--;
                         break;
                     }
-                    __ino_t file_ino = std::strtoul(argv[i], nullptr, 0);
+                    ino_t file_ino = std::strtoul(argv[i], nullptr, 0);
                     if (file_ino == 0) {
                         ERR_EXIT(1, "%s: argument %i inode number \"%s\" was not valid", argv[1], i, argv[i]);
                     }
@@ -1371,7 +1372,7 @@ command flags:
                         WARN("%s: file/directory \"%s\" could not be added, exists but was not a regular file or directory", argv[1], change_rule.path.c_str());
                         continue;
                     }
-                    __ino_t file_ino = path_get_ino(change_rule.path);
+                    ino_t file_ino = path_get_ino(change_rule.path);
                     if (file_index.contains(file_ino)) {
                         WARN("%s: file/directory \"%s\" could not be added, inode number %lu already exists in file index with path \"%s\", you might want to run update on it, skipping", argv[1], change_rule.path.c_str(), file_ino, file_index[file_ino].pathstr.c_str());
                         continue;
@@ -1379,7 +1380,7 @@ command flags:
                     file_index[file_ino] = file_info_t{file_ino, change_rule.path};
                     changed = true;
                 } else if (is_rm) {
-                    __ino_t file_ino = 0;
+                    ino_t file_ino = 0;
                     if (search_index_first) {
                         file_ino = search_index(change_rule.path);
                         if (file_ino != 0) {
@@ -1403,7 +1404,7 @@ command flags:
                     if (!std::filesystem::exists(change_rule.path)) {
                         ERR_EXIT(1, "update: file/directory \"%s\" could not be updated, does not exist", change_rule.path.c_str());
                     }
-                    __ino_t file_ino = path_get_ino(change_rule.path);
+                    ino_t file_ino = path_get_ino(change_rule.path);
                     if (file_index.contains(file_ino)) {
                         file_index[file_ino].pathstr = change_rule.path;
                         changed = true;
