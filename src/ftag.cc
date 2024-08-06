@@ -90,8 +90,8 @@ struct color_t {
 };
 
 
-const std::string esc = "\033[";
-const std::string reset = esc + "0m";
+const std::string esc = "\033["; /* NOLINT */
+const std::string reset = esc + "0m"; /* NOLINT */
 
 std::string color_out(const color_t &color, bool is_fg) {
     return esc + (is_fg ? "38;2;" : "48;2;") + std::to_string(color.r) + ';' + std::to_string(color.g) + ';' + std::to_string(color.b) + 'm';
@@ -122,6 +122,15 @@ struct tag_t {
     bool enabled = true;
 };
 
+bool path_ok(const std::string &pathstr) {
+    try {
+        const std::filesystem::path p = std::filesystem::path(pathstr);
+    } catch (const std::exception &e) {
+        return false;
+    }
+    return true;
+}
+
 struct file_info_t {
     ino_t file_ino;
     std::string pathstr;
@@ -130,9 +139,20 @@ struct file_info_t {
     bool unresolved() const {
         return pathstr.empty();
     }
+    
+    /* caching? why not! clearly checking if pathstr is ok is extremely expensive... */
+    bool pathstr_ok() const {
+        static std::string last_pathstr;
+        static bool last_ok = false;
+        if (last_pathstr != pathstr) {
+            last_pathstr = pathstr;
+            last_ok = path_ok(pathstr);
+        }
+        return last_ok;
+    }
 
+    /* caching? why not! clearly grabbing the filename from pathstr is extremely expensive... */
     std::string filename() const {
-        /* caching? why not! clearly grabbing the filename from pathstr is extremely expensive... */
         static std::string last_pathstr;
         static std::string last_filename;
         if (last_pathstr != pathstr) {
@@ -142,6 +162,7 @@ struct file_info_t {
         return last_filename;
     }
 };
+
 
 std::vector<tid_t> parsed_order; /* NOLINT */
 
@@ -191,6 +212,17 @@ void split_no_rep_delims(const std::string &s, const std::string &delim, std::ve
     if (last != s.size()) { outs.push_back(s.substr(last, s.size())); }
 }
 
+template <class Key, class Tp, class Compare>
+bool map_contains(const std::map<Key, Tp, Compare> &m, const Key &key) {
+    return m.find(key) != m.end();
+}
+
+template <class Key, class Tp, class Compare>
+bool map_contains(const std::unordered_map<Key, Tp, Compare> &m, const Key &key) {
+    return m.find(key) != m.end();
+}
+
+
 std::string get_file_content(const std::string &filename) {
     std::ifstream file(filename);
     std::stringstream ss;
@@ -221,6 +253,7 @@ inline void trim_whitespace(std::string &str) {
         }
     }
 }
+
 
 std::string config_directory = "/.config/ftag/"; /* NOLINT */
 std::string tags_filename = "main.tags"; /* NOLINT */
@@ -312,7 +345,7 @@ void read_saved_tags() {
                 ERR_EXIT(1, "tag file \"%s\" line %i had bad file inode number: \"%s\"", tags_filename.c_str(), i + 1, file_ino_str.c_str());
             }
             current_tag.value().files.push_back(file_ino);
-            if (file_index.contains(file_ino)) {
+            if (map_contains(file_index, file_ino)) {
                 file_index[file_ino].tags.push_back(current_tag.value().id);
             }
             continue;
@@ -610,6 +643,7 @@ struct change_rule_t {
     std::filesystem::path path;
     change_rule_type_t type;
     ino_t file_ino = 0;
+    bool from_ino = false;
 };
 
 void add_all(const tid_t &tagid, std::vector<tid_t> &tags_visited, std::unordered_map<tid_t, bool> &tags_map, std::unordered_map<ino_t, bool> &files_map, bool exclude) {
@@ -646,9 +680,9 @@ void display_tag_info(const tag_t &tag, std::vector<tid_t> &tags_visited, bool c
         }
         if (show_tag_info == show_tag_info_t::full_info && relation == chain_relation_type_t::original) {
             if (custom_file_count.has_value()) {
-                std::cout << " [" << custom_file_count.value() << "]";
+                std::cout << " {" << custom_file_count.value() << "}";
             } else {
-                std::cout << " [" << tag.files.size() << "]";
+                std::cout << " {" << tag.files.size() << "}";
             }
         }
         return;
@@ -683,9 +717,9 @@ void display_tag_info(const tag_t &tag, std::vector<tid_t> &tags_visited, bool c
     }
     if (show_tag_info == show_tag_info_t::full_info && relation == chain_relation_type_t::original) {
         if (custom_file_count.has_value()) {
-            std::cout << " [" << custom_file_count.value() << "]";
+            std::cout << " {" << custom_file_count.value() << "}";
         } else {
-            std::cout << " [" << tag.files.size() << "]";
+            std::cout << " {" << tag.files.size() << "}";
         }
     }
     if (relation != chain_relation_type_t::super && show_tag_info == show_tag_info_t::full_info) {
@@ -736,6 +770,114 @@ void display_file_info(const file_info_t &file_info, const show_file_info_t &sho
     std::cout << '\n';
 }
 
+
+ino_t search_index(const std::filesystem::path &tpath) {
+    for (const auto &[file_ino, file_info] : file_index) {
+        if (file_info.pathstr_ok()) {
+            std::filesystem::path opath = std::filesystem::weakly_canonical(file_info.pathstr);
+            if (tpath == opath) {
+                return file_ino;
+            }
+        }
+    }
+    return 0;
+}
+
+ino_t search_use_fs(const std::filesystem::path &tpath) {
+    struct stat buf{};
+    if (file_exists(tpath.string(), &buf)) {
+        if (map_contains(file_index, buf.st_ino)) {
+            return buf.st_ino;
+        }
+    }
+    return 0;
+}
+
+
+/* starts parsing from position 0 in argv, offset it if need be */
+void parse_file_args(int argc, char **argv, const std::string &command_name, bool is_update, std::vector<change_rule_t> &to_change, bool &search_index_first, change_entry_type_t &change_entry_type) {
+    for (std::uint32_t i = 0; i < argc; i++) {
+        if (!std::strcmp(argv[i], "-f") || !std::strcmp(argv[i], "--file")) {
+            i++;
+            if (i >= argc) {
+                ERR_EXIT(1, "%s: expected at least one file/directory after file flag", command_name.c_str());
+            }
+            for (; i < argc; i++) {
+                if (argv[i][0] == '-') {
+                    WARN("%s: argument %i file/directory \"%s\" began with '-', interpreting as a file, you cannot pass another flag", command_name.c_str(), i, argv[i]);
+                }
+                if (!path_ok(argv[i])) {
+                    ERR_EXIT(1, "%s: argument %i file/directory \"%s\" could not construct path", command_name.c_str(), i, argv[i]);
+                }
+
+                const std::filesystem::path tpath = std::filesystem::weakly_canonical(argv[i]);
+                const std::string a = tpath.string();
+
+                to_change.push_back(change_rule_t{tpath, change_rule_type_t::single_file});
+            }
+        } else if (!std::strcmp(argv[i], "-r") || !std::strcmp(argv[i], "--recursive")) {
+            i++;
+            if (i >= argc) {
+                ERR_EXIT(1, "%s: expected at least one directory after recursive flag", command_name.c_str());
+            }
+            for (; i < argc; i++) {
+                if (argv[i][0] == '-') {
+                    WARN("%s: argument %i directory \"%s\" began with '-', interpreting as a directory, you cannot pass another flag", command_name.c_str(), i, argv[i]);
+                }
+                if (!path_ok(argv[i])) {
+                    ERR_EXIT(1, "%s: argument %i directory \"%s\" could not construct path", command_name.c_str(), i, argv[i]);
+                }
+
+                const std::filesystem::path tpath(argv[i]);
+
+                to_change.push_back(change_rule_t{tpath, change_rule_type_t::recursive});
+            }
+        } else if (!std::strcmp(argv[i], "-i") || !std::strcmp(argv[i], "--inode")) {
+            if (is_update) {
+                ERR_EXIT(1, "%s: cannot update from inode numbers, specify files or directories with the appropriate flags, read the update command section of %s --help for more info", command_name.c_str(), argv[0]);
+            }
+            i++;
+            if (i >= argc) {
+                ERR_EXIT(1, "%s: expected at least one inode number after inode flag", command_name.c_str());
+            }
+            for (; i < argc; i++) {
+                if (argv[i][0] == '-') {
+                    i--;
+                    break;
+                }
+                ino_t file_ino = std::strtoul(argv[i], nullptr, 0);
+                if (file_ino == 0) {
+                    ERR_EXIT(1, "%s: argument %i inode number \"%s\" was not valid", command_name.c_str(), i, argv[i]);
+                }
+                to_change.push_back(change_rule_t{"", change_rule_type_t::inode_number, file_ino});
+            }
+        } else if (!std::strcmp(argv[i], "--search-index")) {
+            search_index_first = true;
+        } else if (!std::strcmp(argv[i], "--no-search-index")) {
+            search_index_first = false;
+        } else if (!std::strcmp(argv[i], "--only-files")) {
+            change_entry_type = change_entry_type_t::only_files;
+        } else if (!std::strcmp(argv[i], "--only-directories")) {
+            change_entry_type = change_entry_type_t::only_directories;
+        } else if (!std::strcmp(argv[i], "--all-entries")) {
+            change_entry_type = change_entry_type_t::all_entries;
+        } else {
+            ERR_EXIT(1, "%s: flag \"%s\" was not recognized", command_name.c_str(), argv[i]);
+        }
+    }
+}
+
+/* recursive */
+void get_all(const std::filesystem::path &path, std::vector<change_rule_t> &out, std::uint32_t position, const change_entry_type_t &change_entry_type) {
+    for (const auto &entry : std::filesystem::recursive_directory_iterator(path)) {
+        if ((change_entry_type == change_entry_type_t::all_entries      && (entry.is_regular_file() || entry.is_directory())) ||
+            (change_entry_type == change_entry_type_t::only_files       && entry.is_regular_file()) ||
+            (change_entry_type == change_entry_type_t::only_directories && entry.is_directory())
+        ) {
+            out.insert(out.begin() + position++, change_rule_t{entry.path(), change_rule_type_t::single_file, path_get_ino(entry.path())});
+        }
+    }
+}
 
 
 
@@ -835,8 +977,8 @@ command flags:
             delete  <name>            : deletes a tag with the name <name>
             enable  <name>            : enables a tag with the name <name>
             disable <name>            : disables a tag with the name <name>
-            add <name> <flags>        : tags file(s) with tag <name>, interprets <flags> exactly like the add command does
-            rm  <name> <flags>        : untags file(s) with tag <name>, interprets <flags> exactly like the rm command does
+            add  <name> <flags>        : tags file(s) with tag <name>, interprets <flags> exactly like the add command does
+            rm   <name> <flags>        : untags file(s) with tag <name>, interprets <flags> exactly like the rm command does
             edit <name> <flags>       : edits a tag
                 flags:
                     -as,  --add-super <supername>        : adds tag <supername> to tag <name>'s supertags
@@ -990,7 +1132,7 @@ command flags:
             bool has_opt = false;
             if (targ.starts_with("--")) {
                 main_arg = targ.substr(2, targ.size() - 2);
-                if (!arg_to_rule_type.contains(main_arg)) {
+                if (!map_contains(arg_to_rule_type, main_arg)) {
                     has_opt = true;
                     main_arg = targ.substr(2, targ.size() - 4);
                     if (targ[targ.size() - 2] != '-') {
@@ -999,12 +1141,12 @@ command flags:
                 }
             } else if (targ[0] == '-') {
                 main_arg = targ.substr(1, targ.size() - 1);
-                if (!arg_to_rule_type.contains(main_arg)) {
+                if (!map_contains(arg_to_rule_type, main_arg)) {
                     has_opt = true;
                     main_arg = targ.substr(1, targ.size() - 2);
                 }
             }
-            if (!arg_to_rule_type.contains(main_arg)) {
+            if (!map_contains(arg_to_rule_type, main_arg)) {
                 ERR_EXIT(1, "search: argument %i not recognized: \"%s\"", i, argv[i]);
             }
             search_rule_type_t rule_type = arg_to_rule_type.find(main_arg)->second;
@@ -1012,7 +1154,7 @@ command flags:
             search_opt_t sopt = search_opt_t::exact;
             if (has_opt) {
                 opt = targ.substr(targ.size() - 1, 1);
-                if (!arg_to_opt.contains(opt)) {
+                if (!map_contains(arg_to_opt, opt)) {
                     ERR_EXIT(1, "search: argument %i search option \"%s\" not found", i, opt.c_str());
                 }
                 sopt = arg_to_opt.find(opt)->second;
@@ -1241,173 +1383,79 @@ command flags:
     } else if (is_add || is_rm || is_update) {
         std::vector<change_rule_t> to_change;
 
-        /* recursive */
-        const auto get_all = [](const std::filesystem::path &path, std::vector<change_rule_t> &out, std::uint32_t position, const change_entry_type_t &change_entry_type) -> void {
-            for (const auto &entry : std::filesystem::recursive_directory_iterator(path)) {
-                if ((change_entry_type == change_entry_type_t::all_entries      && (entry.is_regular_file() || entry.is_directory())) ||
-                    (change_entry_type == change_entry_type_t::only_files       && entry.is_regular_file()) ||
-                    (change_entry_type == change_entry_type_t::only_directories && entry.is_directory())
-                ) {
-                    out.insert(out.begin() + position++, change_rule_t{entry.path(), change_rule_type_t::single_file, path_get_ino(entry.path())});
-                }
-            }
-        };
-
         bool search_index_first = true;
         change_entry_type_t change_entry_type = change_entry_type_t::only_files;
         
-        const auto path_ok = [](const std::string &pathstr) -> bool {
-            try {
-                const std::filesystem::path p = std::filesystem::path(pathstr);
-            } catch (const std::exception &e) {
-                return false;
-            }
-            return true;
-        };
 
-        const auto search_index = [&path_ok](const std::filesystem::path &tpath) -> ino_t {
-            for (const auto &[file_ino, file_info] : file_index) {
-                if (path_ok(file_info.pathstr)) {
-                    std::filesystem::path opath = std::filesystem::weakly_canonical(file_info.pathstr);
-                    if (tpath == opath) {
-                        return file_ino;
-                    }
-                }
-            }
-            return 0;
-        };
+        parse_file_args(argc - 2, argv + 2, argv[1], is_update, to_change, search_index_first, change_entry_type);
 
-        const auto search_use_fs = [](const std::filesystem::path &tpath) -> ino_t {
-            struct stat buf{};
-            if (file_exists(tpath.string(), &buf)) {
-                if (file_index.contains(buf.st_ino)) {
-                    return buf.st_ino;
-                }
-            }
-            return 0;
-        };
 
-        for (std::uint32_t i = 2; i < argc; i++) {
-            if (!std::strcmp(argv[i], "-f") || !std::strcmp(argv[i], "--file")) {
-                i++;
-                if (i >= argc) {
-                    ERR_EXIT(1, "%s: expected at least one file/directory after file flag", argv[1]);
-                }
-                for (; i < argc; i++) {
-                    if (argv[i][0] == '-') {
-                        WARN("%s: argument %i file/directory \"%s\" began with '-', interpreting as a file, you cannot pass another flag", argv[1], i, argv[i]);
-                    }
-                    if (!path_ok(argv[i])) {
-                        ERR_EXIT(1, "%s: argument %i file/directory \"%s\" could not construct path", argv[1], i, argv[i]);
-                    }
-
-                    const std::filesystem::path tpath = std::filesystem::weakly_canonical(argv[i]);
-                    const std::string a = tpath.string();
-
-                    to_change.push_back(change_rule_t{tpath, change_rule_type_t::single_file});
-                }
-            } else if (!std::strcmp(argv[i], "-r") || !std::strcmp(argv[i], "--recursive")) {
-                i++;
-                if (i >= argc) {
-                    ERR_EXIT(1, "%s: expected at least one directory after recursive flag", argv[1]);
-                }
-                for (; i < argc; i++) {
-                    if (argv[i][0] == '-') {
-                        WARN("%s: argument %i directory \"%s\" began with '-', interpreting as a directory, you cannot pass another flag", argv[1], i, argv[i]);
-                    }
-                    if (!path_ok(argv[i])) {
-                        ERR_EXIT(1, "%s: argument %i directory \"%s\" could not construct path", argv[1], i, argv[i]);
-                    }
-
-                    const std::filesystem::path tpath(argv[i]);
-
-                    to_change.push_back(change_rule_t{tpath, change_rule_type_t::recursive});
-                }
-            } else if (!std::strcmp(argv[i], "-i") || !std::strcmp(argv[i], "--inode")) {
-                if (is_update) {
-                    ERR_EXIT(1, "%s: cannot update from inode numbers, specify files or directories with the appropriate flags, read the update command section of %s --help for more info", argv[1], argv[0]);
-                }
-                i++;
-                if (i >= argc) {
-                    ERR_EXIT(1, "%s: expected at least one inode number after inode flag", argv[1]);
-                }
-                for (; i < argc; i++) {
-                    if (argv[i][0] == '-') {
-                        i--;
-                        break;
-                    }
-                    ino_t file_ino = std::strtoul(argv[i], nullptr, 0);
-                    if (file_ino == 0) {
-                        ERR_EXIT(1, "%s: argument %i inode number \"%s\" was not valid", argv[1], i, argv[i]);
-                    }
-                    to_change.push_back(change_rule_t{"", change_rule_type_t::inode_number, file_ino});
-                }
-            } else if (!std::strcmp(argv[i], "--search-index")) {
-                search_index_first = true;
-            } else if (!std::strcmp(argv[i], "--no-search-index")) {
-                search_index_first = false;
-            } else if (!std::strcmp(argv[i], "--only-files")) {
-                change_entry_type = change_entry_type_t::only_files;
-            } else if (!std::strcmp(argv[i], "--only-directories")) {
-                change_entry_type = change_entry_type_t::only_directories;
-            } else if (!std::strcmp(argv[i], "--all-entries")) {
-                change_entry_type = change_entry_type_t::all_entries;
-            } else {
-                ERR_EXIT(1, "%s: flag \"%s\" was not recognized", argv[1], argv[i]);
-            }
-
-        }
-
-        bool changed = false;
+        bool changed_tags = false;
+        bool changed_index = false;
         for (std::int32_t ci = 0; ci < to_change.size(); ci++) { /* NOLINT */
             const change_rule_t &change_rule = to_change[ci];
 
             if (change_rule.type == change_rule_type_t::single_file) {
                 if (is_add) {
                     if (!std::filesystem::exists(change_rule.path)) {
-                        ERR_EXIT(1, "add: file/directory \"%s\" could not be added, does not exist", change_rule.path.c_str());
+                        ino_t maybe_ino = search_index(change_rule.path);
+                        if (maybe_ino != 0) {
+                            ERR_EXIT(1, "add: file/directory \"%s\" could not be added, does not exist, but exists in file index with inode number %lu, you might want to run the update command", change_rule.path.c_str(), maybe_ino);
+                        } else {
+                            ERR_EXIT(1, "add: file/directory \"%s\" could not be added, does not exist", change_rule.path.c_str());
+                        }
                     }
 
                     if (!std::filesystem::is_regular_file(change_rule.path) && !std::filesystem::is_directory(change_rule.path)) {
-                        WARN("%s: file/directory \"%s\" could not be added, exists but was not a regular file or directory", argv[1], change_rule.path.c_str());
+                        ino_t maybe_ino = search_index(change_rule.path);
+                        if (maybe_ino != 0) {
+                            WARN("add: file/directory \"%s\" could not be added, exists but was not a regular file or directory, but also exists in file index with inode number %lu, you might want to run the update command", change_rule.path.c_str(), maybe_ino);
+                        } else {
+                            WARN("add: file/directory \"%s\" could not be added, exists but was not a regular file or directory", change_rule.path.c_str());
+                        }
                         continue;
                     }
-                    ino_t file_ino = path_get_ino(change_rule.path);
-                    if (file_index.contains(file_ino)) {
-                        WARN("%s: file/directory \"%s\" could not be added, inode number %lu already exists in file index with path \"%s\", you might want to run update on it, skipping", argv[1], change_rule.path.c_str(), file_ino, file_index[file_ino].pathstr.c_str());
+                    ino_t file_ino = path_get_ino(change_rule.path); /* inode adder here does not insert into to_change, can ignore change_rule.file_ino */
+                    if (map_contains(file_index, file_ino)) {
+                        WARN("add: file/directory \"%s\" could not be added, inode number %lu already exists in file index with path \"%s\", you might want to run update on it, skipping", change_rule.path.c_str(), file_ino, file_index[file_ino].pathstr.c_str());
                         continue;
                     }
                     file_index[file_ino] = file_info_t{file_ino, change_rule.path};
-                    changed = true;
+                    changed_index = true;
+
                 } else if (is_rm) {
-                    ino_t file_ino = 0;
-                    if (search_index_first) {
+                    ino_t file_ino = change_rule.file_ino;
+                    if (file_ino == 0 && search_index_first) {
                         file_ino = search_index(change_rule.path);
-                        if (file_ino != 0) {
-                            file_index.erase(file_ino);
-                            changed = true;
-                            continue;
-                        }
                     }
-                    file_ino = search_use_fs(change_rule.path);
+                    if (file_ino == 0) {
+                        file_ino = search_use_fs(change_rule.path);
+                    }
                     if (file_ino == 0) {
                         if (search_index_first) {
-                            WARN("%s: file/directory \"%s\" could not be removed, searched both by path in file index and by its inode number (from disk) and was not found", argv[1], change_rule.path.c_str());
+                            WARN("rm: file/directory \"%s\" could not be removed, searched both by path in file index and by its inode number (from disk) and was not found", change_rule.path.c_str());
                         } else {
-                            WARN("%s: file/directory \"%s\" could not be removed, searched by its inode number (from disk) and was not found", argv[1], change_rule.path.c_str());
+                            WARN("rm: file/directory \"%s\" could not be removed, searched by its inode number (from disk) and was not found", change_rule.path.c_str());
                         }
                         continue;
                     }
+                    for (const tid_t &tagid : file_index[file_ino].tags) {
+                        tags[tagid].files.erase(std::remove_if(tags[tagid].files.begin(), tags[tagid].files.end(), [&file_ino](const ino_t &tino) -> bool { return tino == file_ino; }), tags[tagid].files.end());
+                    }
+                    if (!file_index[file_ino].tags.empty()) {
+                        changed_tags = true;
+                    }
                     file_index.erase(file_ino);
-                    changed = true;
+                    changed_index = true;
+
                 } else if (is_update) {
                     if (!std::filesystem::exists(change_rule.path)) {
                         ERR_EXIT(1, "update: file/directory \"%s\" could not be updated, does not exist", change_rule.path.c_str());
                     }
                     ino_t file_ino = path_get_ino(change_rule.path);
-                    if (file_index.contains(file_ino)) {
+                    if (map_contains(file_index, file_ino)) {
                         file_index[file_ino].pathstr = change_rule.path;
-                        changed = true;
+                        changed_index = true;
                     }
                 }
 
@@ -1415,6 +1463,8 @@ command flags:
                 if (!std::filesystem::is_directory(change_rule.path)) {
                     ERR_EXIT(1, "%s: directory \"%s\" was not a directory, could not walk recursively", argv[1], change_rule.path.c_str());
                 }
+                /* because we want to process them in the same order as they were passed, we insert into to_change here and
+                 * also in get_all instead of just push_back */
                 if (change_entry_type == change_entry_type_t::only_directories || change_entry_type == change_entry_type_t::all_entries) {
                     to_change.insert(to_change.begin() + ci+1, change_rule_t{change_rule.path, change_rule_type_t::single_file});
                     get_all(change_rule.path, to_change, ci+2, change_entry_type);
@@ -1424,22 +1474,22 @@ command flags:
 
             } else if (change_rule.type == change_rule_type_t::inode_number) {
                 if (is_rm) {
-                    if (!file_index.contains(change_rule.file_ino)) {
+                    if (!map_contains(file_index, change_rule.file_ino)) {
                         ERR_EXIT(1, "%s: inode number %lu could not be removed, was not found in file index", argv[1], change_rule.file_ino);
                     }
-                    file_index.erase(change_rule.file_ino);
-                    changed = true;
+                    to_change.insert(to_change.begin() + ci+1, change_rule_t{.type = change_rule_type_t::single_file, .file_ino = change_rule.file_ino, .from_ino = true});
                 } else if (is_add) {
-                    if (file_index.contains(change_rule.file_ino)) {
-                        WARN("%s: inode number %lu could not be added, already exists in file index with path \"%s\"", argv[1], change_rule.file_ino, file_index[change_rule.file_ino].pathstr.c_str());
+                    if (map_contains(file_index, change_rule.file_ino)) {
+                        WARN("%s: inode number %lu could not be added, already exists in file index with path \"%s\", skipping", argv[1], change_rule.file_ino, file_index[change_rule.file_ino].pathstr.c_str());
                         continue;
                     }
                     file_index[change_rule.file_ino] = file_info_t{change_rule.file_ino};
-                    changed = true;
+                    changed_index = true;
+                    WARN("%s: inode number %lu added to file index with unresolved path, you might want to run the update command", argv[1], change_rule.file_ino);
                 }
             }
         }
-        if (changed) {
+        if (changed_index) {
             dump_file_index();
         }
 
@@ -1462,6 +1512,9 @@ command flags:
         };
 
         std::string subcommand = argv[2];
+        bool is_tag_add = subcommand == "add";
+        bool is_tag_rm = subcommand == "rm";
+
         if (subcommand == "create") {
             if (argc < 4) {
                 ERR_EXIT(1, "tag: create: expected argument <name>");
@@ -1495,6 +1548,9 @@ command flags:
             }
             for (const tid_t &id : tag.super) {
                 tags[id].sub.erase(std::remove_if(tags[id].sub.begin(), tags[id].sub.end(), [&tag](const tid_t &oid) -> bool { return oid == tag.id; }), tags[id].sub.end());
+            }
+            for (const ino_t &file_ino : tag.files) {
+                file_index[file_ino].tags.erase(std::remove_if(file_index[file_ino].tags.begin(), file_index[file_ino].tags.end(), [&tag](const ino_t &tino) -> bool { return tino == tag.id; }), file_index[file_ino].tags.end());
             }
             tags.erase(tag.id);
             dump_saved_tags();
@@ -1573,11 +1629,12 @@ command flags:
                     }
                     if (!already_super) {
                         ttag.super.push_back(tag.id);
+                        changed = true;
                     }
                     if (!already_sub) {
                         tag.sub.push_back(ttag.id);
+                        changed = true;
                     }
-                    changed = true;
 
                 } else if (!std::strcmp(argv[i], "-rs") || !std::strcmp(argv[i], "--remove-super")) {
                     if (i >= argc - 1) {
@@ -1598,11 +1655,12 @@ command flags:
                     }
                     if (!already_super) {
                         ttag.super.erase(std::remove_if(ttag.super.begin(), ttag.super.end(), [&tag](const tid_t &oid) -> bool { return oid == tag.id; }), ttag.super.end());
+                        changed = true;
                     }
                     if (!already_sub) {
                         tag.sub.erase(std::remove_if(tag.sub.begin(), tag.sub.end(), [&ttag](const tid_t &oid) -> bool { return oid == ttag.id; }), tag.sub.end());
+                        changed = true;
                     }
-                    changed = true;
 
                 } else if (!std::strcmp(argv[i], "-ab") || !std::strcmp(argv[i], "--add-sub")) {
                     if (i >= argc - 1) {
@@ -1622,11 +1680,12 @@ command flags:
                     }
                     if (!already_super) {
                         tag.super.push_back(ttag.id);
+                        changed = true;
                     }
                     if (!already_sub) {
                         ttag.sub.push_back(tag.id);
+                        changed = true;
                     }
-                    changed = true;
 
                 } else if (!std::strcmp(argv[i], "-rb") || !std::strcmp(argv[i], "--remove-sub")) {
                     if (i >= argc - 1) {
@@ -1647,11 +1706,12 @@ command flags:
                     }
                     if (!already_super) {
                         tag.super.erase(std::remove_if(tag.super.begin(), tag.super.end(), [&ttag](const tid_t &oid) -> bool { return oid == ttag.id; }), tag.super.end());
+                        changed = true;
                     }
                     if (!already_sub) {
                         ttag.sub.erase(std::remove_if(ttag.sub.begin(), ttag.sub.end(), [&tag](const tid_t &oid) -> bool { return oid == tag.id; }), ttag.sub.end());
+                        changed = true;
                     }
-                    changed = true;
 
                 } else if (!std::strcmp(argv[i], "-n") || !std::strcmp(argv[i], "--rename")) {
                     if (i >= argc - 1) {
@@ -1681,8 +1741,145 @@ command flags:
             if (changed) {
                 dump_saved_tags();
             }
-        } else if (subcommand == "add") {
+        } else if (is_tag_add || is_tag_rm) {
+            if (argc < 5) {
+                ERR_EXIT(1, "tag: %s: expected arguments <name> <flags>", subcommand.c_str());
+            }
+            std::string name = argv[3];
+            bool found = false;
+            tag_t &ttag = tag_by_name(name, found);
+            if (!found) {
+                ERR_EXIT(1, "tag: %s: tag \"%s\" could not be edited, was not found", subcommand.c_str(),  name.c_str());
+            }
+            std::vector<change_rule_t> to_change;
 
+            bool search_index_first = true;
+            change_entry_type_t change_entry_type = change_entry_type_t::only_files;
+
+            parse_file_args(argc - 4, argv + 4, "tag: " + subcommand, false, to_change, search_index_first, change_entry_type);
+
+            bool changed_tags = false;
+            bool changed_index = false;
+            for (std::int32_t ci = 0; ci < to_change.size(); ci++) { /* NOLINT */
+                change_rule_t change_rule = to_change[ci];
+
+                if (change_rule.type == change_rule_type_t::single_file) {
+                    if (is_tag_add) {
+                        if (!change_rule.from_ino) {
+                            if (!std::filesystem::exists(change_rule.path)) {
+                                ino_t maybe_ino = search_index(change_rule.path);
+                                if (maybe_ino != 0) {
+                                    ERR_EXIT(1, "tag: add: file/directory \"%s\" could not be tagged with tag \"%s\", does not exist, but exists in file index with inode number %lu, you might want to run the update or fix command", change_rule.path.c_str(), ttag.name.c_str(), maybe_ino);
+                                } else {
+                                    ERR_EXIT(1, "tag: add: file/directory \"%s\" could not be tagged with tag \"%s\", does not exist", change_rule.path.c_str(), ttag.name.c_str());
+                                }
+                            }
+                            if (!std::filesystem::is_regular_file(change_rule.path) && !std::filesystem::is_directory(change_rule.path)) {
+                                ino_t maybe_ino = search_index(change_rule.path);
+                                if (maybe_ino != 0) {
+                                    WARN("tag: add: file/directory \"%s\" could not be tagged with tag \"%s\", exists but was not a regular file or directory, but also exists in file index with inode number %lu, you might want to run the update command", change_rule.path.c_str(), ttag.name.c_str(), maybe_ino);
+                                } else {
+                                    WARN("tag: add: file/directory \"%s\" could not be tagged with tag \"%s\", exists but was not a regular file or directory", change_rule.path.c_str(), ttag.name.c_str());
+                                }
+                                continue;
+                            }
+                        }
+
+                        ino_t file_ino = change_rule.file_ino;
+                        if (file_ino == 0) {
+                            file_ino = path_get_ino(change_rule.path);
+                        }
+                        if (!map_contains(file_index, file_ino)) {
+                            if (!change_rule.from_ino) {
+                                WARN("tag: add: file/directory \"%s\" was not in file index, adding and tagging with tag \"%s\"", change_rule.path.c_str(), ttag.name.c_str());
+                            } else {
+                                WARN("tag: add: inode number %lu was not in file index, adding with unresolved path and tagging with tag \"%s\", you might want to run the update command", change_rule.file_ino, ttag.name.c_str());
+                            }
+                            file_index[file_ino] = file_info_t{file_ino, change_rule.path.string()};
+                            changed_index = true;
+                        }
+                        file_info_t &file_info = file_index[file_ino];
+                        bool already_tagged = std::find(file_info.tags.begin(), file_info.tags.end(), ttag.id) != file_info.tags.end();
+                        bool already_revtagged = std::find(ttag.files.begin(), ttag.files.end(), file_ino) != ttag.files.end();
+                        if (already_tagged || already_revtagged) {
+                            if (!change_rule.from_ino) {
+                                WARN("tag: add: file/directory \"%s\" was already tagged with tag \"%s\"", change_rule.path.c_str(), ttag.name.c_str());
+                            } else {
+                                WARN("tag: add: inode number %lu (path \"%s\") was already tagged with tag \"%s\"", change_rule.file_ino, change_rule.path.c_str(), ttag.name.c_str());
+                            }
+                        }
+                        if (!already_tagged) {
+                            file_index[file_ino].tags.push_back(ttag.id);
+                            changed_tags = true;
+                        }
+                        if (!already_revtagged) {
+                            ttag.files.push_back(file_ino);
+                            changed_tags = true;
+                        }
+
+                    } else if (is_tag_rm) {
+                        ino_t file_ino = change_rule.file_ino;
+                        if (file_ino == 0 && search_index_first) {
+                            file_ino = search_index(change_rule.path);
+                        }
+                        if (file_ino == 0) {
+                            file_ino = search_use_fs(change_rule.path);
+                        }
+                        if (file_ino == 0) {
+                            if (search_index_first) {
+                                WARN("tag: rm: file/directory \"%s\" could not be untagged from tag \"%s\", searched both by path in file index and by its inode number (from disk) and was not found", change_rule.path.c_str(), ttag.name.c_str());
+                            } else {
+                                WARN("tag: rm: file/directory \"%s\" could not be untagged from tag \"%s\", searched by its inode number (from disk) and was not found", change_rule.path.c_str(), ttag.name.c_str());
+                            }
+                            continue;
+                        }
+                        file_info_t &file_info = file_index[file_ino];
+                        bool already_tagged = std::find(file_info.tags.begin(), file_info.tags.end(), ttag.id) == file_info.tags.end();
+                        bool already_revtagged = std::find(ttag.files.begin(), ttag.files.end(), file_ino) == ttag.files.end();
+                        if (!already_tagged && !already_revtagged) {
+                            WARN("tag: rm: file/directory \"%s\" could not be untagged from tag \"%s\", was not tagged with it", change_rule.path.c_str(), ttag.name.c_str());
+                            continue;
+                        }
+                        if (!already_tagged) {
+                            file_info.tags.erase(std::remove_if(file_info.tags.begin(), file_info.tags.end(), [&ttag](const tid_t &tagid) -> bool { return ttag.id == tagid; }), file_info.tags.end());
+                            changed_tags = true;
+                        }
+                        if (!already_revtagged) {
+                            ttag.files.erase(std::remove_if(ttag.files.begin(), ttag.files.end(), [&file_ino](const ino_t &tino) -> bool { return tino == file_ino; }), ttag.files.end());
+                            changed_tags = true;
+                        }
+
+                    }
+                } else if (change_rule.type == change_rule_type_t::recursive) {
+                    if (!std::filesystem::is_directory(change_rule.path)) {
+                        ERR_EXIT(1, "tag: %s: directory \"%s\" was not a directory, could not walk recursively", subcommand.c_str(), change_rule.path.c_str());
+                    }
+                    /* because we want to process them in the same order as they were passed, we insert into to_change here and
+                     * also in get_all instead of just push_back */
+                    if (change_entry_type == change_entry_type_t::only_directories || change_entry_type == change_entry_type_t::all_entries) {
+                        to_change.insert(to_change.begin() + ci+1, change_rule_t{change_rule.path, change_rule_type_t::single_file});
+                        get_all(change_rule.path, to_change, ci+2, change_entry_type);
+                    } else {
+                        get_all(change_rule.path, to_change, ci+1, change_entry_type);
+                    }
+
+                } else if (change_rule.type == change_rule_type_t::inode_number) {
+                    if (is_tag_rm) {
+                        if (!map_contains(file_index, change_rule.file_ino)) {
+                            ERR_EXIT(1, "tag: %s: inode number %lu could not be removed, was not found in file index", subcommand.c_str(), change_rule.file_ino);
+                        }
+                        to_change.insert(to_change.begin() + ci+1, change_rule_t{file_index[change_rule.file_ino].pathstr, change_rule_type_t::single_file, change_rule.file_ino, true});
+                    } else if (is_tag_add) {
+                        to_change.insert(to_change.begin() + ci+1, change_rule_t{file_index[change_rule.file_ino].pathstr, change_rule_type_t::single_file, change_rule.file_ino, true});
+                    }
+                }
+            }
+            if (changed_tags) {
+                dump_saved_tags();
+            }
+            if (changed_index) {
+                dump_file_index();
+            }
         } else {
             ERR_EXIT(1, "tag: subcommand \"%s\" was not recognized", subcommand.c_str());
         }
