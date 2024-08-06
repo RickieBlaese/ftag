@@ -90,8 +90,8 @@ struct color_t {
 };
 
 
-static constexpr std::string esc = "\033[";
-static constexpr std::string reset = esc + "0m";
+const std::string esc = "\033[";
+const std::string reset = esc + "0m";
 
 std::string color_out(const color_t &color, bool is_fg) {
     return esc + (is_fg ? "38;2;" : "48;2;") + std::to_string(color.r) + ';' + std::to_string(color.g) + ';' + std::to_string(color.b) + 'm';
