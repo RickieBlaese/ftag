@@ -1060,6 +1060,8 @@ command flags:
     read_file_index();
     read_saved_tags();
 
+    /* TODO(stole): fully validate parsed tags and file index here */
+
     /* commands */
     if (is_search) {
 
@@ -1875,8 +1877,8 @@ command flags:
 
                 } else if (change_rule.type == change_rule_type_t::inode_number) {
                     if (is_tag_rm) {
-                        if (!map_contains(file_index, change_rule.file_ino)) {
-                            ERR_EXIT(1, "tag: %s: inode number %lu could not be removed, was not found in file index", subcommand.c_str(), change_rule.file_ino);
+                        if (!map_contains(file_index, change_rule.file_ino) && std::find(ttag.files.begin(), ttag.files.end(), change_rule.file_ino) == ttag.files.end()) {
+                            ERR_EXIT(1, "tag: %s: inode number %lu could not be untagged from tag \"%s\", was not found in file index", subcommand.c_str(), change_rule.file_ino, ttag.name.c_str());
                         }
                         to_change.insert(to_change.begin() + ci+1, change_rule_t{file_index[change_rule.file_ino].pathstr, change_rule_type_t::single_file, change_rule.file_ino, true});
                     } else if (is_tag_add) {
