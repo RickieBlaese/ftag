@@ -897,10 +897,9 @@ int main(int argc, char **argv) { /* NOLINT */
 
 
 description:
-    ftag is a utility to tag files/directories on your filesystem, using inode numbers to track them, it
-    doesn't modify the files on disk at all
+    ftag is a utility to tag files/directories on your filesystem, using inode numbers to track and identify them, without modifying files on disk
 
-    tags consist of a name, an optional color, and so-called supertags that it descends from
+    tags consist of a name, an optional color, and so-called supertags that they descend from
     tag names can't have spaces, parens, square brackets, colons, and cannot start with a dash, encouraging a
     plain naming style like-this
 
