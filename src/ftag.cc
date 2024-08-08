@@ -594,6 +594,7 @@ enum struct show_tag_info_t : std::uint16_t {
 enum struct search_rule_type_t : std::uint16_t {
     tag, tag_exclude, file, file_exclude, all, all_exclude,
     all_list, all_list_exclude,
+    inode, inode_exclude
 };
 
 enum struct search_opt_t : std::uint16_t {
@@ -604,6 +605,7 @@ struct search_rule_t {
     search_rule_type_t type = search_rule_type_t::tag; /* doesn't matter not used */
     search_opt_t opt = search_opt_t::exact;
     std::string text;
+    ino_t inum = 0;
 };
 
 const std::unordered_map<std::string, search_rule_type_t> arg_to_rule_type = { /* NOLINT */
@@ -623,7 +625,12 @@ const std::unordered_map<std::string, search_rule_type_t> arg_to_rule_type = { /
     {"al", search_rule_type_t::all_list},
     {"all-list", search_rule_type_t::all_list},
     {"ale", search_rule_type_t::all_list_exclude},
-    {"all-list-exclude", search_rule_type_t::all_list_exclude}
+    {"all-list-exclude", search_rule_type_t::all_list_exclude},
+
+    {"i", search_rule_type_t::inode},
+    {"inode", search_rule_type_t::inode},
+    {"ie", search_rule_type_t::inode_exclude},
+    {"inode-exclude", search_rule_type_t::inode_exclude}
 };
 
 const std::unordered_map<std::string, search_opt_t> arg_to_opt = { /* NOLINT */
@@ -938,45 +945,47 @@ no command flags:
 
 command flags:
     search:
-        -al,  --all-list                   : includes all tags and files
-        -ale, --all-list-exclude           : excludes all tags and files
+        -al,  --all-list              : includes all tags and files
+        -ale, --all-list-exclude      : excludes all tags and files
 
-        -a <text>,  --all <text>           : includes all files under tag <text> and subtags
-        -ae <text>, --all-exclude <text>   : excludes all files under tag <text> and subtags
-        -t <text>,  --tag <text>           : includes all files with tag <text>
-        -te <text>, --tag-exclude <text>   : excludes all files with tag <text>
-        -f <text>,  --file <text>          : includes all files with filename/path <text>
-                                             (see --search-file-name and --search-file-path)
-        -fe <text>, --file-exclude <text>  : excludes all files with filename/path <text>
-                                             (see --search-file-name and --search-file-path)
+        -a,  --all <text>             : includes all files under tag <text> and subtags
+        -ae, --all-exclude <text>     : excludes all files under tag <text> and subtags
+        -t,  --tag <text>             : includes all files with tag <text>
+        -te, --tag-exclude <text>     : excludes all files with tag <text>
+        -f,  --file <text>            : includes all files with filename/path <text>
+                                        (see --search-file-name and --search-file-path)
+        -fe, --file-exclude <text>    : excludes all files with filename/path <text>
+                                        (see --search-file-name and --search-file-path)
+        -i,  --inode <inum>           : include the file with inode <inum>
+        -ie, --inode-exclude <inum>   : exclude the file with inode <inum>
 
-        --search-file-name                 : uses filenames when searching for files (default)
-                                             only has an effect when used with --file and --file-exclude
-        --search-file-path                 : instead of searching by filenames, search the entire file path
-                                             only has an effect when used with --file and --file-exclude
-                                           *** warning: may produce unexpected results
+        --search-file-name            : uses filenames when searching for files (default)
+                                        only has an effect when used with --file and --file-exclude
+        --search-file-path            : instead of searching by filenames, search the entire file path
+                                        only has an effect when used with --file and --file-exclude
+                                      *** warning: may produce unexpected results
 
-        --tags-files                       : displays both tags and files in result (default)
-        --tags-only                        : only displays tags in result, no files
-        --files-only                       : only displays files in result, no tags
+        --tags-files                  : displays both tags and files in result (default)
+        --tags-only                   : only displays tags in result, no files
+        --files-only                  : only displays files in result, no tags
 
-        --enable-color                     : enables displaying tag color (default)
-        --disable-color                    : disables displaying tag color
+        --enable-color                : enables displaying tag color (default)
+        --disable-color               : disables displaying tag color
 
-        --tag-name-only                    : shows only the tag name (still includes color) (default)
-        --display-tag-chain                : shows the tag chain each tag descends from, up to and including repeats
-        --full-tag-info                    : shows all information about a tag
+        --tag-name-only               : shows only the tag name (still includes color) (default)
+        --display-tag-chain           : shows the tag chain each tag descends from, up to and including repeats
+        --full-tag-info               : shows all information about a tag
 
-        --filename-only                    : shows only the filename of each file (default)
-        --full-path-only                   : shows only the full file path
-        --inum-only                        : shows only the file inode number
-        --full-file-info                   : shows all information about a file, including inode numbers
+        --filename-only               : shows only the filename of each file (default)
+        --full-path-only              : shows only the full file path
+        --inum-only                   : shows only the file inode number
+        --full-file-info              : shows all information about a file, including inode numbers
 
-        --organize-by-tag                  : organizes by tag, allows duplicate file output (default)
-        --organize-by-file                 : organizes by file, allows duplicate tag output
+        --organize-by-tag             : organizes by tag, allows duplicate file output (default)
+        --organize-by-file            : organizes by file, allows duplicate tag output
 
-        --formatting                       : uses formatting (default)
-        --no-formatting                    : doesn't output any formatting, useful for piping/sending to other tools
+        --formatting                  : uses formatting (default)
+        --no-formatting               : doesn't output any formatting, useful for piping/sending to other tools
 
         all search flags that take in <text> can be modified to do a basic search for <text> by adding an "s", like -fs or
         --file-s, or modified to interpret <text> as regex with "r", like -ter or --tag-exclude-r
@@ -1188,12 +1197,24 @@ command flags:
                 }
                 sopt = arg_to_opt.find(opt)->second;
             }
-            if (i >= argc - 1 && rule_type != search_rule_type_t::all_list && rule_type != search_rule_type_t::all_list_exclude) {
-                ERR_EXIT(1, "search: expected argument <text> after \"%s\"", targ.c_str());
-            }
-            if (rule_type == search_rule_type_t::all_list || rule_type == search_rule_type_t::all_list_exclude) {
+            if (rule_type == search_rule_type_t::inode || rule_type == search_rule_type_t::inode_exclude) {
+                if (i >= argc - 1) {
+                    ERR_EXIT(1, "search: expected argument <inum> after \"%s\"", targ.c_str());
+                }
+                ino_t inum = std::strtoul(argv[++i], nullptr, 0);
+                if (inum == 0) {
+                    ERR_EXIT(1, "search: argument %i inode number \"%s\" was not valid", i, argv[i]);
+                }
+                if (!map_contains(file_index, inum)) {
+                    ERR_EXIT(1, "search: argument %i inode number %lu was not in file index", i, inum);
+                }
+                search_rules.push_back(search_rule_t{.type = rule_type, .inum = inum});
+            } else if (rule_type == search_rule_type_t::all_list || rule_type == search_rule_type_t::all_list_exclude) {
                 search_rules.push_back(search_rule_t{rule_type});
-            } else {
+            } else { /* takes <text> */
+                if (i >= argc - 1) {
+                    ERR_EXIT(1, "search: expected argument <text> after \"%s\"", targ.c_str());
+                }
                 search_rules.push_back(search_rule_t{rule_type, sopt, std::string(argv[++i])});
             }
         }
@@ -1212,11 +1233,12 @@ command flags:
             search_rules.push_back(search_rule_t{search_rule_type_t::all_list});
         }
         for (const search_rule_t &search_rule : search_rules) {
-            bool exclude = search_rule.type == search_rule_type_t::tag_exclude || search_rule.type == search_rule_type_t::file_exclude || search_rule.type == search_rule_type_t::all_exclude || search_rule.type == search_rule_type_t::all_list_exclude;
+            bool exclude = search_rule.type == search_rule_type_t::tag_exclude || search_rule.type == search_rule_type_t::file_exclude || search_rule.type == search_rule_type_t::all_exclude || search_rule.type == search_rule_type_t::all_list_exclude || search_rule.type == search_rule_type_t::inode_exclude;
             bool is_file = search_rule.type == search_rule_type_t::file || search_rule.type == search_rule_type_t::file_exclude;
             bool is_tag = search_rule.type == search_rule_type_t::tag || search_rule.type == search_rule_type_t::tag_exclude;
             bool is_all = search_rule.type == search_rule_type_t::all || search_rule.type == search_rule_type_t::all_exclude;
             bool is_all_list = search_rule.type == search_rule_type_t::all_list || search_rule.type == search_rule_type_t::all_list_exclude;
+            bool is_inode = search_rule.type == search_rule_type_t::inode || search_rule.type == search_rule_type_t::inode_exclude;
             if (is_all_list) {
                 for (auto &[_, status] : tags_returned) {
                     status = !exclude;
@@ -1224,6 +1246,8 @@ command flags:
                 for (auto &[_, status] : files_returned) {
                     status = !exclude;
                 }
+            } else if (is_inode) {
+                files_returned[search_rule.inum] = !exclude;
             } else if (search_rule.opt == search_opt_t::exact) {
                 if (is_file) {
                     for (const auto &[file_ino, file_info] : file_index) {
