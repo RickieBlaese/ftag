@@ -1083,13 +1083,38 @@ command flags:
         }
     }
 
-    bool is_search = !std::strcmp(argv[1], "search");
+    bool is_search = false;
 
-    bool is_add = !std::strcmp(argv[1], "add");
-    bool is_rm = !std::strcmp(argv[1], "rm");
-    bool is_update = !std::strcmp(argv[1], "update");
-    bool is_fix = !std::strcmp(argv[1], "fix");
-    bool is_tag = !std::strcmp(argv[1], "tag");
+    bool is_add = false;
+    bool is_rm = false;
+    bool is_update = false;
+    bool is_fix = false;
+    bool is_tag = false;
+
+    std::vector<std::string> commands = {
+        "search", "add", "rm", "update", "fix", "tag"
+    };
+    std::vector<std::string> matches;
+    for (const std::string &cmdname : commands) {
+        if (cmdname.starts_with(argv[1])) {
+            matches.push_back(cmdname);
+        }
+    }
+    if (matches.size() == 1) {
+        if (matches[0] == "search") {
+            is_search = true;
+        } else if (matches[0] == "add") {
+            is_add = true;
+        } else if (matches[0] == "rm") {
+            is_rm = true;
+        } else if (matches[0] == "update") {
+            is_update = true;
+        } else if (matches[0] == "fix") {
+            is_fix = true;
+        } else if (matches[0] == "tag") {
+            is_tag = true;
+        }
+    }
 
     read_file_index();
     read_saved_tags();
@@ -1466,6 +1491,34 @@ command flags:
                 }
                 if (display_type == display_type_t::tags_files && !no_formatting) {
                     std::cout << '\n';
+                }
+            }
+            /* tags with no files */
+            std::vector<tid_t> tags_no_files;
+            for (const auto &[id, inc] : tags_returned) {
+                if (!inc) { continue; }
+                if (tags[id].files.empty()) {
+                    tags_no_files.push_back(id);
+                }
+            }
+            if (!tags_no_files.empty()) {
+                if (display_type == display_type_t::tags || display_type == display_type_t::tags_files) {
+                    for (std::uint32_t i = 0; i < tags_no_files.size() - 1; i++) {
+                        std::vector<tid_t> tags_visited;
+                        display_tag_info(tags[tags_no_files[i]], tags_visited, color_enabled, show_tag_info, no_formatting, chain_relation_type_t::original);
+                        std::cout << ", ";
+                    }
+                    std::vector<tid_t> tags_visited;
+                    display_tag_info(tags[tags_no_files[tags_no_files.size() - 1]], tags_visited, color_enabled, show_tag_info, no_formatting, chain_relation_type_t::original);
+                    if (display_type == display_type_t::tags_files) {
+                        std::cout << ": ";
+                    }
+                }
+                if (display_type == display_type_t::files || display_type == display_type_t::tags_files) {
+                    std::cout << "(no files)\n";
+                    if (display_type == display_type_t::tags_files && !no_formatting) {
+                        std::cout << '\n';
+                    }
                 }
             }
         }
