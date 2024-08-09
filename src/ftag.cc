@@ -350,9 +350,8 @@ void read_saved_tags() {
                 file_index[file_ino].tags.push_back(current_tag.value().id);
             }
             continue;
-        }
         /* is a declaring tag line */
-        else {
+        } else {
             FINISH_TAG;
             START_TAG;
             std::string ttag;
@@ -577,6 +576,12 @@ std::vector<tid_t> enabled_only(const std::vector<tid_t> &tagids) {
     return ret;
 }
 
+std::string parse_quotes(const std::string &s) {
+    std::stringstream ss(s);
+    std::string out;
+    ss >> std::quoted(out);
+    return out;
+}
 
 
 enum struct display_type_t : std::uint16_t {
@@ -763,7 +768,7 @@ void display_tag_info(const tag_t &tag, std::vector<tid_t> &tags_visited, bool c
 /* does also output a newline, unlike display_tag_info */
 void display_file_info(const file_info_t &file_info, const show_file_info_t &show_file_info, bool no_formatting) {
     if (!no_formatting) {
-        std::cout << "    ";
+        std::cout << "  ";
     }
     if (show_file_info == show_file_info_t::inum_only) {
         std::cout << file_info.file_ino;
@@ -818,73 +823,76 @@ ino_t search_use_fs(const std::filesystem::path &tpath) {
 
 /* starts parsing from position 0 in argv, offset it if need be */
 void parse_file_args(int argc, char **argv, const std::string &command_name, bool is_update, std::vector<change_rule_t> &to_change, bool &search_index_first, change_entry_type_t &change_entry_type) {
+    std::vector<std::string> sargv(argc);
+    for (std::uint32_t j = 0; j < argc; j++) {
+        sargv[j] = parse_quotes(argv[j]);
+    }
     for (std::uint32_t i = 0; i < argc; i++) {
-        if (!std::strcmp(argv[i], "-f") || !std::strcmp(argv[i], "--file")) {
+        if (sargv[i] == "-f" || sargv[i] == "--file") {
             i++;
             if (i >= argc) {
                 ERR_EXIT(1, "%s: expected at least one file/directory after file flag", command_name.c_str());
             }
             for (; i < argc; i++) {
-                if (argv[i][0] == '-') {
-                    WARN("%s: argument %i file/directory \"%s\" began with '-', interpreting as a file, you cannot pass another flag", command_name.c_str(), i, argv[i]);
+                if (sargv[i][0] == '-') {
+                    WARN("%s: argument %i file/directory \"%s\" began with '-', interpreting as a file, you cannot pass another flag", command_name.c_str(), i, sargv[i].c_str());
                 }
-                if (!path_ok(argv[i])) {
-                    ERR_EXIT(1, "%s: argument %i file/directory \"%s\" could not construct path", command_name.c_str(), i, argv[i]);
+                if (!path_ok(sargv[i])) {
+                    ERR_EXIT(1, "%s: argument %i file/directory \"%s\" could not construct path", command_name.c_str(), i, sargv[i].c_str());
                 }
 
-                const std::filesystem::path tpath = std::filesystem::weakly_canonical(argv[i]);
-                const std::string a = tpath.string();
+                const std::filesystem::path tpath = std::filesystem::weakly_canonical(sargv[i]);
 
                 to_change.push_back(change_rule_t{tpath, change_rule_type_t::single_file});
             }
-        } else if (!std::strcmp(argv[i], "-r") || !std::strcmp(argv[i], "--recursive")) {
+        } else if (sargv[i] == "-r" || sargv[i] == "--recursive") {
             i++;
             if (i >= argc) {
                 ERR_EXIT(1, "%s: expected at least one directory after recursive flag", command_name.c_str());
             }
             for (; i < argc; i++) {
-                if (argv[i][0] == '-') {
-                    WARN("%s: argument %i directory \"%s\" began with '-', interpreting as a directory, you cannot pass another flag", command_name.c_str(), i, argv[i]);
+                if (sargv[i][0] == '-') {
+                    WARN("%s: argument %i directory \"%s\" began with '-', interpreting as a directory, you cannot pass another flag", command_name.c_str(), i, sargv[i].c_str());
                 }
-                if (!path_ok(argv[i])) {
-                    ERR_EXIT(1, "%s: argument %i directory \"%s\" could not construct path", command_name.c_str(), i, argv[i]);
+                if (!path_ok(sargv[i])) {
+                    ERR_EXIT(1, "%s: argument %i directory \"%s\" could not construct path", command_name.c_str(), i, sargv[i].c_str());
                 }
 
-                const std::filesystem::path tpath(argv[i]);
+                const std::filesystem::path tpath(sargv[i]);
 
                 to_change.push_back(change_rule_t{tpath, change_rule_type_t::recursive});
             }
-        } else if (!std::strcmp(argv[i], "-i") || !std::strcmp(argv[i], "--inode")) {
+        } else if (sargv[i] == "-i" || sargv[i] == "--inode") {
             if (is_update) {
-                ERR_EXIT(1, "%s: cannot update from inode numbers, specify files or directories with the appropriate flags, read the update command section of %s --help for more info", command_name.c_str(), argv[0]);
+                ERR_EXIT(1, "%s: cannot update from inode numbers, specify files or directories with the appropriate flags, read the update command section of ftag --help for more info", command_name.c_str());
             }
             i++;
             if (i >= argc) {
                 ERR_EXIT(1, "%s: expected at least one inode number after inode flag", command_name.c_str());
             }
             for (; i < argc; i++) {
-                if (argv[i][0] == '-') {
+                if (sargv[i][0] == '-') {
                     i--;
                     break;
                 }
-                ino_t file_ino = std::strtoul(argv[i], nullptr, 0);
+                ino_t file_ino = std::strtoul(sargv[i].c_str(), nullptr, 0);
                 if (file_ino == 0) {
-                    ERR_EXIT(1, "%s: argument %i inode number \"%s\" was not valid", command_name.c_str(), i, argv[i]);
+                    ERR_EXIT(1, "%s: argument %i inode number \"%s\" was not valid", command_name.c_str(), i, sargv[i].c_str());
                 }
                 to_change.push_back(change_rule_t{"", change_rule_type_t::inode_number, file_ino});
             }
-        } else if (!std::strcmp(argv[i], "--search-index")) {
+        } else if (sargv[i] == "--search-index") {
             search_index_first = true;
-        } else if (!std::strcmp(argv[i], "--no-search-index")) {
+        } else if (sargv[i] == "--no-search-index") {
             search_index_first = false;
-        } else if (!std::strcmp(argv[i], "--only-files")) {
+        } else if (sargv[i] == "--only-files") {
             change_entry_type = change_entry_type_t::only_files;
-        } else if (!std::strcmp(argv[i], "--only-directories")) {
+        } else if (sargv[i] == "--only-directories") {
             change_entry_type = change_entry_type_t::only_directories;
-        } else if (!std::strcmp(argv[i], "--all-entries")) {
+        } else if (sargv[i] == "--all-entries") {
             change_entry_type = change_entry_type_t::all_entries;
         } else {
-            ERR_EXIT(1, "%s: flag \"%s\" was not recognized", command_name.c_str(), argv[i]);
+            ERR_EXIT(1, "%s: flag \"%s\" was not recognized", command_name.c_str(), sargv[i].c_str());
         }
     }
 }
@@ -1243,9 +1251,6 @@ command flags:
                 search_rules.push_back(search_rule_t{rule_type, sopt, std::string(argv[++i])});
             }
         }
-        if (!no_formatting) {
-            reset_out();
-        }
         std::map<tid_t, bool, tagcmp_t> tags_returned;
         for (const auto &[id, _] : tags) {
             tags_returned[id] = false;
@@ -1391,15 +1396,24 @@ command flags:
                 if (display_type == display_type_t::tags || display_type == display_type_t::tags_files) {
                     std::vector<tid_t> tags_visited;
                     display_tag_info(tag, tags_visited, color_enabled, show_tag_info, no_formatting, chain_relation_type_t::original);
-                    if (display_type == display_type_t::tags_files && !tag.files.empty()) {
+                    if (display_type == display_type_t::tags_files) {
                         std::cout << ':';
                     }
-                    std::cout << '\n';
+                    if (tag.files.empty()) {
+                        std::cout << ' ';
+                    }
                 }
                 if (display_type == display_type_t::files || display_type == display_type_t::tags_files) {
-                    for (const ino_t &file_ino : tag.files) {
-                        if (!files_returned[file_ino]) { continue; }
-                        display_file_info(file_index[file_ino], show_file_info, no_formatting || (display_type == display_type_t::files));
+                    if (!tag.files.empty()) {
+                        if (display_type == display_type_t::tags || display_type == display_type_t::tags_files) {
+                            std::cout << '\n';
+                        }
+                        for (const ino_t &file_ino : tag.files) {
+                            if (!files_returned[file_ino]) { continue; }
+                            display_file_info(file_index[file_ino], show_file_info, no_formatting || (display_type == display_type_t::files));
+                        }
+                    } else {
+                        std::cout << "(no files)\n";
                     }
                     if (display_type == display_type_t::tags_files) {
                         std::cout << '\n';
@@ -1475,24 +1489,6 @@ command flags:
                     std::cout << '\n';
                 }
             }
-            if (!no_tag_group.empty()) {
-                if (display_type == display_type_t::tags || display_type == display_type_t::tags_files) {
-                    std::vector<tid_t> tags_visited;
-                    display_tag_info(tag_t{.id = 0, .name = "(no tags)"}, tags_visited, color_enabled, show_tag_info, no_formatting, chain_relation_type_t::original, no_tag_group.size());
-                    if (display_type == display_type_t::tags_files) {
-                        std::cout << ':';
-                    }
-                    std::cout << '\n';
-                }
-                if (display_type == display_type_t::files || display_type == display_type_t::tags_files) {
-                    for (const ino_t &ofile_ino : no_tag_group) {
-                        display_file_info(file_index[ofile_ino], show_file_info, no_formatting || (display_type == display_type_t::files));
-                    }
-                }
-                if (display_type == display_type_t::tags_files && !no_formatting) {
-                    std::cout << '\n';
-                }
-            }
             /* tags with no files */
             std::vector<tid_t> tags_no_files;
             for (const auto &[id, inc] : tags_returned) {
@@ -1519,6 +1515,24 @@ command flags:
                     if (display_type == display_type_t::tags_files && !no_formatting) {
                         std::cout << '\n';
                     }
+                }
+            }
+            if (!no_tag_group.empty()) {
+                if (display_type == display_type_t::tags || display_type == display_type_t::tags_files) {
+                    std::vector<tid_t> tags_visited;
+                    display_tag_info(tag_t{.id = 0, .name = "(no tags)"}, tags_visited, color_enabled, show_tag_info, no_formatting, chain_relation_type_t::original, no_tag_group.size());
+                    if (display_type == display_type_t::tags_files) {
+                        std::cout << ':';
+                    }
+                    std::cout << '\n';
+                }
+                if (display_type == display_type_t::files || display_type == display_type_t::tags_files) {
+                    for (const ino_t &ofile_ino : no_tag_group) {
+                        display_file_info(file_index[ofile_ino], show_file_info, no_formatting || (display_type == display_type_t::files));
+                    }
+                }
+                if (display_type == display_type_t::tags_files && !no_formatting) {
+                    std::cout << '\n';
                 }
             }
         }
@@ -2243,17 +2257,17 @@ command flags:
                             continue;
                         }
                         file_info_t &file_info = file_index[file_ino];
-                        bool already_tagged = std::find(file_info.tags.begin(), file_info.tags.end(), ttag.id) == file_info.tags.end();
-                        bool already_revtagged = std::find(ttag.files.begin(), ttag.files.end(), file_ino) == ttag.files.end();
+                        bool already_tagged = std::find(file_info.tags.begin(), file_info.tags.end(), ttag.id) != file_info.tags.end();
+                        bool already_revtagged = std::find(ttag.files.begin(), ttag.files.end(), file_ino) != ttag.files.end();
                         if (!already_tagged && !already_revtagged) {
                             WARN("tag: rm: file/directory \"%s\" could not be untagged from tag \"%s\", was not tagged with it", change_rule.path.c_str(), ttag.name.c_str());
                             continue;
                         }
-                        if (!already_tagged) {
+                        if (already_tagged) {
                             std::erase(file_info.tags, ttag.id);
                             changed_tags = true;
                         }
-                        if (!already_revtagged) {
+                        if (already_revtagged) {
                             std::erase(ttag.files, file_ino);
                             changed_tags = true;
                         }
