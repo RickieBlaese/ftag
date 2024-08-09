@@ -165,12 +165,12 @@ struct file_info_t {
 };
 
 
-std::vector<tid_t> parsed_order; /* NOLINT */
+std::vector<tid_t> tags_parsed_order; /* NOLINT */
 
 /* have to use a cmp struct here instead of normal lambda cmp because of storage/lifetime bs */
 struct tagcmp_t {
     bool operator()(const tid_t &a, const tid_t &b) const {
-        return std::find(parsed_order.begin(), parsed_order.end(), a) < std::find(parsed_order.begin(), parsed_order.end(), b);
+        return std::find(tags_parsed_order.begin(), tags_parsed_order.end(), a) < std::find(tags_parsed_order.begin(), tags_parsed_order.end(), b);
     }
 };
 
@@ -325,7 +325,7 @@ void read_saved_tags() {
 
 #define FINISH_TAG { \
     if (current_tag.has_value()) { \
-        parsed_order.push_back(current_tag.value().id); /* should do before we add it */ \
+        tags_parsed_order.push_back(current_tag.value().id); /* should do before we add it */ \
         tags[current_tag.value().id] = current_tag.value(); \
     } \
 }
@@ -664,7 +664,7 @@ struct fix_rule_t {
     fix_rule_type_t type;
 };
 
-void add_all(const tid_t &tagid, std::vector<tid_t> &tags_visited, std::unordered_map<tid_t, bool> &tags_map, std::unordered_map<ino_t, bool> &files_map, bool exclude) {
+void add_all(const tid_t &tagid, std::vector<tid_t> &tags_visited, std::map<tid_t, bool, tagcmp_t> &tags_map, std::map<ino_t, bool> &files_map, bool exclude) {
     for (const tid_t &id : enabled_only(tags[tagid].sub)) {
         if (std::find(tags_visited.begin(), tags_visited.end(), id) == tags_visited.end()) {
             tags_visited.push_back(id);
@@ -1221,11 +1221,11 @@ command flags:
         if (!no_formatting) {
             reset_out();
         }
-        std::unordered_map<tid_t, bool> tags_returned;
+        std::map<tid_t, bool, tagcmp_t> tags_returned;
         for (const auto &[id, _] : tags) {
             tags_returned[id] = false;
         }
-        std::unordered_map<ino_t, bool> files_returned;
+        std::map<ino_t, bool> files_returned;
         for (const auto &[file_ino, _] : file_index) {
             files_returned[file_ino] = false;
         }
@@ -1366,7 +1366,7 @@ command flags:
                 if (display_type == display_type_t::tags || display_type == display_type_t::tags_files) {
                     std::vector<tid_t> tags_visited;
                     display_tag_info(tag, tags_visited, color_enabled, show_tag_info, no_formatting, chain_relation_type_t::original);
-                    if (display_type == display_type_t::tags_files) {
+                    if (display_type == display_type_t::tags_files && !tag.files.empty()) {
                         std::cout << ':';
                     }
                     std::cout << '\n';
@@ -1394,20 +1394,30 @@ command flags:
                 if (display_type == display_type_t::tags || display_type == display_type_t::tags_files) {
                     std::vector<tid_t> tags_visited;
                     display_tag_info(tag_t{.id = 0, .name = "(no tags)"}, tags_visited, color_enabled, show_tag_info, no_formatting, chain_relation_type_t::original, files_no_tags.size());
-                    std::cout << ":\n";
-                }
-                for (const ino_t &file_ino : files_no_tags) {
-                    display_file_info(file_index[file_ino], show_file_info, no_formatting || (display_type == display_type_t::files));
-                }
-                if ((display_type == display_type_t::tags || display_type == display_type_t::tags_files) && !no_formatting) {
+                    if (display_type == display_type_t::tags_files) {
+                        std::cout << ':';
+                    }
                     std::cout << '\n';
+                }
+                if (display_type == display_type_t::files || display_type == display_type_t::tags_files) {
+                    for (const ino_t &file_ino : files_no_tags) {
+                        display_file_info(file_index[file_ino], show_file_info, no_formatting || (display_type == display_type_t::files));
+                    }
+                    if (display_type == display_type_t::tags_files && !no_formatting) {
+                        std::cout << '\n';
+                    }
                 }
             }
         } else {
+            std::vector<ino_t> no_tag_group;
             for (const auto &[file_ino, file_inc] : files_returned) {
                 if (!file_inc) { continue; }
                 std::vector<ino_t> group = {file_ino};
                 std::vector<tid_t> ttags = enabled_only(file_index[file_ino].tags);
+                if (ttags.empty()) {
+                    no_tag_group.push_back(file_ino);
+                    continue;
+                }
                 std::sort(ttags.begin(), ttags.end(), [](const tid_t &a, const tid_t &b) -> bool { return tags[a].name.compare(tags[b].name); });
                 for (const auto &[ofile_ino, ofile_inc] : files_returned) {
                     if (!ofile_inc || ofile_ino == file_ino) { continue; }
@@ -1419,31 +1429,48 @@ command flags:
                     }
                 }
                 if (display_type == display_type_t::tags || display_type == display_type_t::tags_files) {
-                    if (!ttags.empty()) {
-                        for (std::uint32_t i = 0; i < ttags.size() - 1; i++) {
-                            std::vector<tid_t> tags_visited;
-                            display_tag_info(tags[ttags[i]], tags_visited, color_enabled, show_tag_info, no_formatting, chain_relation_type_t::original);
-                            std::cout << ", ";
-                        }
+                    for (std::uint32_t i = 0; i < ttags.size() - 1; i++) {
                         std::vector<tid_t> tags_visited;
-                        display_tag_info(tags[ttags[ttags.size() - 1]], tags_visited, color_enabled, show_tag_info, no_formatting, chain_relation_type_t::original);
-                    } else {
-                        std::vector<tid_t> tags_visited;
-                        display_tag_info(tag_t{.id = 0, .name = "(no tags)"}, tags_visited, color_enabled, show_tag_info, no_formatting, chain_relation_type_t::original, group.size());
+                        display_tag_info(tags[ttags[i]], tags_visited, color_enabled, show_tag_info, no_formatting, chain_relation_type_t::original);
+                        std::cout << ", ";
                     }
-                    std::cout << ":\n";
+                    std::vector<tid_t> tags_visited;
+                    display_tag_info(tags[ttags[ttags.size() - 1]], tags_visited, color_enabled, show_tag_info, no_formatting, chain_relation_type_t::original);
+                    if (display_type == display_type_t::tags_files) {
+                        std::cout << ':';
+                    }
+                    std::cout << '\n';
                 }
                 if (display_type == display_type_t::files || display_type == display_type_t::tags_files) {
                     for (const ino_t &ofile_ino : group) {
                         display_file_info(file_index[ofile_ino], show_file_info, no_formatting || (display_type == display_type_t::files));
                     }
                 }
-                if (display_type == display_type_t::tags_files) {
+                if (display_type == display_type_t::tags_files && !no_formatting) {
+                    std::cout << '\n';
+                }
+            }
+            if (!no_tag_group.empty()) {
+                if (display_type == display_type_t::tags || display_type == display_type_t::tags_files) {
+                    std::vector<tid_t> tags_visited;
+                    display_tag_info(tag_t{.id = 0, .name = "(no tags)"}, tags_visited, color_enabled, show_tag_info, no_formatting, chain_relation_type_t::original, no_tag_group.size());
+                    if (display_type == display_type_t::tags_files) {
+                        std::cout << ':';
+                    }
+                    std::cout << '\n';
+                }
+                if (display_type == display_type_t::files || display_type == display_type_t::tags_files) {
+                    for (const ino_t &ofile_ino : no_tag_group) {
+                        display_file_info(file_index[ofile_ino], show_file_info, no_formatting || (display_type == display_type_t::files));
+                    }
+                }
+                if (display_type == display_type_t::tags_files && !no_formatting) {
                     std::cout << '\n';
                 }
             }
         }
     /* end of search command */
+
     } else if (is_add || is_rm || is_update) {
         std::vector<change_rule_t> to_change;
 
@@ -2203,6 +2230,7 @@ command flags:
                     }
                 }
             }
+
             if (changed_tags) {
                 dump_saved_tags();
             }
