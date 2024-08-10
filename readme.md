@@ -11,6 +11,7 @@ with designating supertags, you can construct a large and complicated tag graph.
 the tag file format and index file format are designed to be almost entirely human-readable and editable
 however, they do reference files by their inode numbers, so they might be slightly unwieldly to edit by hand
 
+```
 commands:
     search  : searches for and returns tags and files
     tag     : create/edit/delete tags, and assign and remove files from tags
@@ -18,5 +19,6 @@ commands:
     rm      : removes files to be tracked/tagged by ftag
     update  : updates the index of tracked files, use if some have been moved/renamed
     fix     : fixes the inode numbers used in the tags file and file index
+```
 
 for more info, check out `ftag --help`
