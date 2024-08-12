@@ -590,13 +590,6 @@ std::vector<tid_t> enabled_only(const std::vector<tid_t> &tagids) {
     return ret;
 }
 
-std::string parse_quotes(const std::string &s) {
-    std::stringstream ss(s);
-    std::string out;
-    ss >> std::quoted(out);
-    return out;
-}
-
 
 enum struct display_type_t : std::uint16_t {
     tags_files, tags, files
@@ -855,25 +848,93 @@ ino_t search_use_fs(const std::filesystem::path &tpath) {
     return 0;
 }
 
+std::string read_stdin() {
+    static constexpr std::streamsize n = 128;
+    std::streamsize readn = 0;
+    std::string in(n, '\0');
+    std::cin.read(in.data(), n);
+    readn += std::cin.gcount();
+    while (!std::cin.eof()) {
+        in.resize(readn * 2, '\0');
+        std::cin.read(in.data() + readn, readn);
+        readn += std::cin.gcount();
+    }
+    in.resize(readn);
+    return in;
+}
+
+void parse_as_args(std::vector<std::string> &ret, const std::string &s, const std::string &err_command_name, const std::string &err_could_not) {
+    bool prev_backslash = false;
+    bool in_quote = false;
+    bool prev_space = false;
+    std::string current_arg = "";
+    for (const char &c : s) {
+        if (c == '\\' && !prev_backslash) {
+            prev_backslash = true;
+            continue;
+        } else if (c == '"' && !prev_backslash) {
+            in_quote = !in_quote;
+            continue;
+        } else if (std::isspace(static_cast<unsigned char>(c)) && !prev_backslash && !in_quote) {
+            if (prev_space || current_arg.empty()) {
+                prev_space = true;
+                continue;
+            }
+            prev_space = true;
+            ret.push_back(current_arg);
+            current_arg = "";
+            continue;
+        }
+        prev_space = false;
+        prev_backslash = false;
+        current_arg.push_back(c);
+    }
+    if (!current_arg.empty()) {
+        ret.push_back(current_arg);
+    }
+    if (in_quote) {
+        std::fprintf(stderr, "%s: %s, unclosed quote\n", err_command_name.c_str(), err_could_not.c_str());
+        exit(1);
+    }
+}
+
 
 /* starts parsing from position 0 in argv, offset it if need be */
-void parse_file_args(int argc, char **argv, const std::string &command_name, bool is_update, std::vector<change_rule_t> &to_change, bool &search_index_first, change_entry_type_t &change_entry_type) {
+void parse_file_args(int argc, char **argv, const std::string &err_command_name, bool is_update, std::vector<change_rule_t> &to_change, bool &search_index_first, change_entry_type_t &change_entry_type) {
     std::vector<std::string> sargv(argc);
+    bool recognize_dash = true;
     for (std::uint32_t j = 0; j < argc; j++) {
-        sargv[j] = parse_quotes(argv[j]);
+        for (std::uint32_t i = 1; i < argc; i++) {
+            if (!std::strcmp(argv[i], "-rd") || !std::strcmp(argv[i], "--recognize-dash")) {
+                recognize_dash = true;
+            } else if (!std::strcmp(argv[i], "-id") || !std::strcmp(argv[i], "--ignore-dash")) {
+                recognize_dash = false;
+            }
+        }
+        sargv[j] = argv[j];
     }
     for (std::uint32_t i = 0; i < argc; i++) {
         if (sargv[i] == "-f" || sargv[i] == "--file") {
             i++;
             if (i >= argc) {
-                ERR_EXIT(1, "%s: expected at least one file/directory after file flag", command_name.c_str());
+                ERR_EXIT(1, "%s: expected at least one file/directory after file flag", err_command_name.c_str());
             }
             for (; i < argc; i++) {
-                if (sargv[i][0] == '-') {
-                    WARN("%s: argument %i file/directory \"%s\" began with '-', interpreting as a file, you cannot pass another flag", command_name.c_str(), i, sargv[i].c_str());
+                if (sargv[i] == "-" && recognize_dash) {
+                    WARN("%s: recognizing \"-\", reading remaining file names from stdin", err_command_name.c_str());
+                    std::string in = read_stdin();
+                    std::vector<std::string> inargs;
+                    parse_as_args(inargs, in, err_command_name, "could not parse stdin as file name args");
+                    for (const std::string &s : inargs) {
+                        to_change.push_back(change_rule_t{s, change_rule_type_t::single_file});
+                    }
+                    break;
+                }
+                if (sargv[i][0] == '-' && sargv[i] != "-") {
+                    WARN("%s: argument %i file/directory \"%s\" began with '-', interpreting as a file, you cannot pass another flag", err_command_name.c_str(), i, sargv[i].c_str());
                 }
                 if (!path_ok(sargv[i])) {
-                    ERR_EXIT(1, "%s: argument %i file/directory \"%s\" could not construct path", command_name.c_str(), i, sargv[i].c_str());
+                    ERR_EXIT(1, "%s: argument %i file/directory \"%s\" could not construct path", err_command_name.c_str(), i, sargv[i].c_str());
                 }
 
                 const std::filesystem::path tpath = std::filesystem::weakly_canonical(sargv[i]);
@@ -883,14 +944,24 @@ void parse_file_args(int argc, char **argv, const std::string &command_name, boo
         } else if (sargv[i] == "-r" || sargv[i] == "--recursive") {
             i++;
             if (i >= argc) {
-                ERR_EXIT(1, "%s: expected at least one directory after recursive flag", command_name.c_str());
+                ERR_EXIT(1, "%s: expected at least one directory after recursive flag", err_command_name.c_str());
             }
             for (; i < argc; i++) {
-                if (sargv[i][0] == '-') {
-                    WARN("%s: argument %i directory \"%s\" began with '-', interpreting as a directory, you cannot pass another flag", command_name.c_str(), i, sargv[i].c_str());
+                if (sargv[i] == "-" && recognize_dash) {
+                    WARN("%s: recognizing \"-\", reading remaining directory names from stdin", err_command_name.c_str());
+                    std::string in = read_stdin();
+                    std::vector<std::string> inargs;
+                    parse_as_args(inargs, in, err_command_name, "could not parse stdin as directory name args");
+                    for (const std::string &s : inargs) {
+                        to_change.push_back(change_rule_t{s, change_rule_type_t::recursive});
+                    }
+                    break;
+                }
+                if (sargv[i][0] == '-' && sargv[i] != "-") {
+                    WARN("%s: argument %i directory \"%s\" began with '-', interpreting as a directory, you cannot pass another flag", err_command_name.c_str(), i, sargv[i].c_str());
                 }
                 if (!path_ok(sargv[i])) {
-                    ERR_EXIT(1, "%s: argument %i directory \"%s\" could not construct path", command_name.c_str(), i, sargv[i].c_str());
+                    ERR_EXIT(1, "%s: argument %i directory \"%s\" could not construct path", err_command_name.c_str(), i, sargv[i].c_str());
                 }
 
                 const std::filesystem::path tpath(sargv[i]);
@@ -899,20 +970,30 @@ void parse_file_args(int argc, char **argv, const std::string &command_name, boo
             }
         } else if (sargv[i] == "-i" || sargv[i] == "--inode") {
             if (is_update) {
-                ERR_EXIT(1, "%s: cannot update from inode numbers, specify files or directories with the appropriate flags, read the update command section of ftag --help for more info", command_name.c_str());
+                ERR_EXIT(1, "%s: cannot update from inode numbers, specify files or directories with the appropriate flags, read the update command section of ftag --help for more info", err_command_name.c_str());
             }
             i++;
             if (i >= argc) {
-                ERR_EXIT(1, "%s: expected at least one inode number after inode flag", command_name.c_str());
+                ERR_EXIT(1, "%s: expected at least one inode number after inode flag", err_command_name.c_str());
             }
             for (; i < argc; i++) {
+                if (sargv[i] == "-" && recognize_dash) {
+                    WARN("%s: recognizing \"-\", reading remaining inode numbers for this flag from stdin", err_command_name.c_str());
+                    std::string in = read_stdin();
+                    std::vector<std::string> inargs;
+                    parse_as_args(inargs, in, err_command_name, "could not parse stdin as inode number args");
+                    for (const std::string &s : inargs) {
+                        to_change.push_back(change_rule_t{s, change_rule_type_t::inode_number});
+                    }
+                    break;
+                }
                 if (sargv[i][0] == '-') {
                     i--;
                     break;
                 }
                 ino_t file_ino = std::strtoul(sargv[i].c_str(), nullptr, 0);
                 if (file_ino == 0) {
-                    ERR_EXIT(1, "%s: argument %i inode number \"%s\" was not valid", command_name.c_str(), i, sargv[i].c_str());
+                    ERR_EXIT(1, "%s: argument %i inode number \"%s\" was not valid", err_command_name.c_str(), i, sargv[i].c_str());
                 }
                 to_change.push_back(change_rule_t{"", change_rule_type_t::inode_number, file_ino});
             }
@@ -927,7 +1008,7 @@ void parse_file_args(int argc, char **argv, const std::string &command_name, boo
         } else if (sargv[i] == "--all-entries") {
             change_entry_type = change_entry_type_t::all_entries;
         } else {
-            ERR_EXIT(1, "%s: flag \"%s\" was not recognized", command_name.c_str(), sargv[i].c_str());
+            ERR_EXIT(1, "%s: flag \"%s\" was not recognized", err_command_name.c_str(), sargv[i].c_str());
         }
     }
 }
@@ -991,16 +1072,16 @@ command flags:
         -al,  --all-list              : includes all tags and files
         -ale, --all-list-exclude      : excludes all tags and files
 
-        -a,  --all <text>             : includes all files under tag <text> and subtags
-        -ae, --all-exclude <text>     : excludes all files under tag <text> and subtags
-        -t,  --tag <text>             : includes all files with tag <text>
-        -te, --tag-exclude <text>     : excludes all files with tag <text>
-        -f,  --file <text>            : includes all files with filename/path <text>
+        -a,   --all <text>            : includes all files under tag <text> and subtags
+        -ae,  --all-exclude <text>    : excludes all files under tag <text> and subtags
+        -t,   --tag <text>            : includes all files with tag <text>
+        -te,  --tag-exclude <text>    : excludes all files with tag <text>
+        -f,   --file <text>           : includes all files with filename/path <text>
                                         (see --search-file-name and --search-file-path)
-        -fe, --file-exclude <text>    : excludes all files with filename/path <text>
+        -fe,  --file-exclude <text>   : excludes all files with filename/path <text>
                                         (see --search-file-name and --search-file-path)
-        -i,  --inode <inum>           : include the file with inode <inum>
-        -ie, --inode-exclude <inum>   : exclude the file with inode <inum>
+        -i,   --inode <inum>          : include the file with inode <inum>
+        -ie,  --inode-exclude <inum>  : exclude the file with inode <inum>
 
         --search-file-name            : uses filenames when searching for files (default)
                                         only has an effect when used with --file and --file-exclude
@@ -1071,8 +1152,13 @@ command flags:
                                                                 *** --no-search-index
 
         -i, --inode <inum> [inum] ...                           : adds/removes inode numbers from the index
-        
+
+        -rd, --recognize-dash                                   : when "-" is passed to --file, --recursive, or --inode, read the
+                                                                  remaining names/inode numbers from stdin (default)
+        -id, --ignore-dash                                      : do not treat "-" differently
+
         --only-files                                            : only adds/removes regular files (default)
+                                                                  only has an effect with --recursive
         --only-directories                                      : only adds/removes directories, including the initial <directory>
                                                                   only has an effect with --recursive
         --all-entries                                           : adds both regular files and directories, including the initial
@@ -1091,8 +1177,10 @@ command flags:
                                                                   (does not iterate through the contents of the directories)
         -r, --recursive <directory> [directory] ...             : updates everything in the directories (recursive)
 
-        unfortunately, you cannot pass multiple flags (excluding -i, --inode) for adding/removing/updating in one invocation
-        of ftag to allow you to use all file/directory names, i.e. invoke only one of them at a time like this:
+    add, rm, update:
+        unfortunately, you cannot pass multiple flags (excluding -i, --inode, or when using "-" to indicate from stdin) for
+        adding/removing/updating in one invocation of ftag to allow you to use all file/directory names, i.e. invoke only one of
+        them at a time like this:
             )" << argv[0] << R"( add -f file1.txt ../script.py
             )" << argv[0] << R"( update --recursive ./directory1 /home/user
         you may, however, pass multiple inode flags and then end with a file or directory flag like such:
@@ -1464,9 +1552,12 @@ command flags:
                     display_tag_info(tag, tags_visited, tags_matched, color_enabled, show_tag_info, no_formatting, chain_relation_type_t::original);
                     if (display_type == display_type_t::tags_files && (tag.files.empty() || has_any_returned)) {
                         std::cout << ':';
+                        if (tag.files.empty()) {
+                            std::cout << ' ';
+                        }
                     }
-                    if (tag.files.empty()) {
-                        std::cout << ' ';
+                    if (display_type == display_type_t::tags) {
+                        std::cout << '\n';
                     }
                 }
                 if (display_type == display_type_t::files || display_type == display_type_t::tags_files) {
@@ -1512,6 +1603,9 @@ command flags:
                     if (display_type == display_type_t::tags_files && !no_formatting) {
                         std::cout << '\n';
                     }
+                }
+                if (display_type == display_type_t::tags) {
+                    std::cout << '\n';
                 }
             }
         } else {
@@ -1711,7 +1805,7 @@ command flags:
                     }
                     file_index[change_rule.file_ino] = file_info_t{change_rule.file_ino};
                     changed_index = true;
-                    WARN("%s: inode number %lu added to file index with unresolved path, you might want to run the update command", argv[1], change_rule.file_ino);
+                    WARN("%s: inode number %lu adding to file index with unresolved path, you might want to run the update command", argv[1], change_rule.file_ino);
                 }
             }
         }
