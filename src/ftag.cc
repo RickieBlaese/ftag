@@ -68,13 +68,31 @@ T get_random_int() {
     return std::uniform_int_distribution<T>()(engine);
 }
 
+template <class Key, class Tp, class Compare>
+bool map_contains(const std::map<Key, Tp, Compare> &m, const Key &key) {
+    return m.find(key) != m.end();
+}
+
+template <class Key, class Tp, class Compare>
+bool map_contains(const std::unordered_map<Key, Tp, Compare> &m, const Key &key) {
+    return m.find(key) != m.end();
+}
+
 bool file_exists(const std::string &filename, struct stat *pbuffer = nullptr) {
-    if (pbuffer != nullptr) {
-        return !stat(filename.c_str(), pbuffer);
-    } else {
-        struct stat buffer{};
-        return !stat(filename.c_str(), &buffer);
+    /* static std::unordered_map<std::string, std::pair<struct stat, int>> statcache; */
+    struct stat buffer{};
+    if (pbuffer == nullptr) {
+        pbuffer = &buffer;
     }
+    return !stat(filename.c_str(), pbuffer);
+    /* if (map_contains(statcache, filename)) {
+        *pbuffer = statcache[filename].first;
+        return !statcache[filename].second;
+    } else {
+        int r = stat(filename.c_str(), pbuffer);
+        statcache[filename] = std::make_pair(*pbuffer, r);
+        return !r;
+    } */
 }
 
 ino_t path_get_ino(const std::filesystem::path &path) {
@@ -225,16 +243,6 @@ void split_no_rep_delims(const std::string &s, const std::string &delim, std::ve
         }
     }
     if (last != s.size()) { outs.push_back(s.substr(last, s.size())); }
-}
-
-template <class Key, class Tp, class Compare>
-bool map_contains(const std::map<Key, Tp, Compare> &m, const Key &key) {
-    return m.find(key) != m.end();
-}
-
-template <class Key, class Tp, class Compare>
-bool map_contains(const std::unordered_map<Key, Tp, Compare> &m, const Key &key) {
-    return m.find(key) != m.end();
 }
 
 
@@ -901,30 +909,39 @@ void parse_as_args(std::vector<std::string> &ret, const std::string &s, const st
 
 /* starts parsing from position 0 in argv, offset it if need be */
 void parse_file_args(int argc, char **argv, const std::string &err_command_name, bool is_update, std::vector<change_rule_t> &to_change, bool &search_index_first, change_entry_type_t &change_entry_type) {
-    std::vector<std::string> sargv(argc);
+    std::vector<std::string> sargv;
     bool recognize_dash = true;
-    for (std::uint32_t j = 0; j < argc; j++) {
-        for (std::uint32_t i = 1; i < argc; i++) {
-            if (!std::strcmp(argv[i], "-rd") || !std::strcmp(argv[i], "--recognize-dash")) {
-                recognize_dash = true;
-            } else if (!std::strcmp(argv[i], "-id") || !std::strcmp(argv[i], "--ignore-dash")) {
-                recognize_dash = false;
-            }
-        }
-        sargv[j] = argv[j];
-    }
+    bool parse_per_line = true;
     for (std::uint32_t i = 0; i < argc; i++) {
+        if (!std::strcmp(argv[i], "-rd") || !std::strcmp(argv[i], "--recognize-dash")) {
+            recognize_dash = true;
+        } else if (!std::strcmp(argv[i], "-id") || !std::strcmp(argv[i], "--ignore-dash")) {
+            recognize_dash = false;
+        } else if (!std::strcmp(argv[i], "-sa") || !std::strcmp(argv[i], "--stdin-parse-as-args")) {
+            parse_per_line = false;
+        } else if (!std::strcmp(argv[i], "-sl") || !std::strcmp(argv[i], "--stdin-parse-per-line")) {
+            parse_per_line = true;
+        } else {
+            sargv.emplace_back(argv[i]);
+        }
+    }
+    std::uint32_t sargc = sargv.size();
+    for (std::uint32_t i = 0; i < sargc; i++) {
         if (sargv[i] == "-f" || sargv[i] == "--file") {
             i++;
-            if (i >= argc) {
+            if (i >= sargc) {
                 ERR_EXIT(1, "%s: expected at least one file/directory after file flag", err_command_name.c_str());
             }
-            for (; i < argc; i++) {
+            for (; i < sargc; i++) {
                 if (sargv[i] == "-" && recognize_dash) {
                     WARN("%s: recognizing \"-\", reading remaining file names from stdin", err_command_name.c_str());
                     std::string in = read_stdin();
                     std::vector<std::string> inargs;
-                    parse_as_args(inargs, in, err_command_name, "could not parse stdin as file name args");
+                    if (parse_per_line) {
+                        split_no_rep_delims(in, "\n", inargs);
+                    } else {
+                        parse_as_args(inargs, in, err_command_name, "could not parse stdin as file name args");
+                    }
                     for (const std::string &s : inargs) {
                         to_change.push_back(change_rule_t{s, change_rule_type_t::single_file});
                     }
@@ -943,15 +960,19 @@ void parse_file_args(int argc, char **argv, const std::string &err_command_name,
             }
         } else if (sargv[i] == "-r" || sargv[i] == "--recursive") {
             i++;
-            if (i >= argc) {
+            if (i >= sargc) {
                 ERR_EXIT(1, "%s: expected at least one directory after recursive flag", err_command_name.c_str());
             }
-            for (; i < argc; i++) {
+            for (; i < sargc; i++) {
                 if (sargv[i] == "-" && recognize_dash) {
                     WARN("%s: recognizing \"-\", reading remaining directory names from stdin", err_command_name.c_str());
                     std::string in = read_stdin();
                     std::vector<std::string> inargs;
-                    parse_as_args(inargs, in, err_command_name, "could not parse stdin as directory name args");
+                    if (parse_per_line) {
+                        split_no_rep_delims(in, "\n", inargs);
+                    } else {
+                        parse_as_args(inargs, in, err_command_name, "could not parse stdin as directory name args");
+                    }
                     for (const std::string &s : inargs) {
                         to_change.push_back(change_rule_t{s, change_rule_type_t::recursive});
                     }
@@ -973,15 +994,19 @@ void parse_file_args(int argc, char **argv, const std::string &err_command_name,
                 ERR_EXIT(1, "%s: cannot update from inode numbers, specify files or directories with the appropriate flags, read the update command section of ftag --help for more info", err_command_name.c_str());
             }
             i++;
-            if (i >= argc) {
+            if (i >= sargc) {
                 ERR_EXIT(1, "%s: expected at least one inode number after inode flag", err_command_name.c_str());
             }
-            for (; i < argc; i++) {
+            for (; i < sargc; i++) {
                 if (sargv[i] == "-" && recognize_dash) {
                     WARN("%s: recognizing \"-\", reading remaining inode numbers for this flag from stdin", err_command_name.c_str());
                     std::string in = read_stdin();
                     std::vector<std::string> inargs;
-                    parse_as_args(inargs, in, err_command_name, "could not parse stdin as inode number args");
+                    if (parse_per_line) {
+                        split_no_rep_delims(in, "\n", inargs);
+                    } else {
+                        parse_as_args(inargs, in, err_command_name, "could not parse stdin as inode number args");
+                    }
                     for (const std::string &s : inargs) {
                         to_change.push_back(change_rule_t{s, change_rule_type_t::inode_number});
                     }
@@ -1156,6 +1181,11 @@ command flags:
         -rd, --recognize-dash                                   : when "-" is passed to --file, --recursive, or --inode, read the
                                                                   remaining names/inode numbers from stdin (default)
         -id, --ignore-dash                                      : do not treat "-" differently
+
+        -sl, --stdin-parse-per-line                             : if reading names/inode numbers from stdin, parse stdin as one
+                                                                  argument per line (default)
+        -sa, --stdin-parse-as-args                              : if reading names/inode numbers from stdin, parse stdin as if
+                                                                  normal shell arguments
 
         --only-files                                            : only adds/removes regular files (default)
                                                                   only has an effect with --recursive
@@ -2114,6 +2144,11 @@ command flags:
             tid_t tagid = generate_unique_tid();
             if (tag_name_bad(argv[3])) {
                 ERR_EXIT(1, "tag: create: bad tag name \"%s\"", argv[3]);
+            }
+            for (const auto &[tagid, tag] : tags) {
+                if (tag.name == argv[3]) {
+                    ERR_EXIT(1, "tag: create: tag \"%s\" could not be created, already exists", argv[3]);
+                }
             }
             tags[tagid] = tag_t{tagid, argv[3], color};
             dump_saved_tags();
