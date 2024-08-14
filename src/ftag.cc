@@ -17,6 +17,8 @@
 #include <cstring>
 
 #include <sys/stat.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
 
 
 #define STRINGIZE_NX(A) #A
@@ -24,42 +26,60 @@
 #define STRINGIZE(A) STRINGIZE_NX(A)
 
 #define VERSIONA 0
-#define VERSIONB 2
-#define VERSIONC 2
+#define VERSIONB 3
+#define VERSIONC 1
 #define VERSION STRINGIZE(VERSIONA) "." STRINGIZE(VERSIONB) "." STRINGIZE(VERSIONC)
 
+/* > 0 */
+enum struct warn_level_t : std::uint32_t {
+    all = 1,
+    urgent
+};
+
+warn_level_t warn_level = warn_level_t::all; /* NOLINT */
 
 #ifdef DEBUG_BUILD
+
 #define ERR_EXIT(A, ...) { \
-    std::fprintf(stderr, "error: file " __FILE__ ":%i in %s(): ", __LINE__, __func__); \
+    std::fprintf(stderr, "ftag: error: file " __FILE__ ":%i in %s(): ", __LINE__, __func__); \
     std::fprintf(stderr, __VA_ARGS__); \
     std::fputc('\n', stderr); \
     std::exit(static_cast<int>(A)); \
 }
 
 #define WARN(...) { \
-    std::fprintf(stderr, "warning: file " __FILE__ ":%i in %s(): ", __LINE__, __func__); \
-    std::fprintf(stderr, __VA_ARGS__); \
-    std::fputc('\n', stderr); \
+    if (warn_level <= warn_level_t::all) { \
+        std::fprintf(stderr, "ftag: warning: file " __FILE__ ":%i in %s(): ", __LINE__, __func__); \
+        std::fprintf(stderr, __VA_ARGS__); \
+        std::fputc('\n', stderr); \
+    } \
 }
 
 #else
-#define ERR_EXIT(A, ...) { \
-    std::fputs("error: ", stderr); \
+
+#define ERR_EXIT(A, ...) { /* NOLINT */ \
+    std::fputs("ftag: error: ", stderr); \
     std::fprintf(stderr, __VA_ARGS__); \
     std::fputc('\n', stderr); \
     std::exit(static_cast<int>(A)); \
 }
 
-#define WARN(...) { \
-    std::fputs("warning: ", stderr); \
-    std::fprintf(stderr, __VA_ARGS__); \
-    std::fputc('\n', stderr); \
+#define WARN(...) { /* NOLINT */ \
+    if (warn_level <= warn_level_t::all) { \
+        std::fputs("ftag: warning: ", stderr); \
+        std::fprintf(stderr, __VA_ARGS__); \
+        std::fputc('\n', stderr); \
+    } \
 }
 
 #endif
 
 
+std::uint16_t get_columns() {
+    static struct winsize w;
+    ioctl(STDOUT_FILENO, TIOCGWINSZ, &w);
+    return w.ws_col;
+} 
 
 template <typename T>
 T get_random_int() {
@@ -79,20 +99,11 @@ bool map_contains(const std::unordered_map<Key, Tp, Compare> &m, const Key &key)
 }
 
 bool file_exists(const std::string &filename, struct stat *pbuffer = nullptr) {
-    /* static std::unordered_map<std::string, std::pair<struct stat, int>> statcache; */
     struct stat buffer{};
     if (pbuffer == nullptr) {
         pbuffer = &buffer;
     }
     return !stat(filename.c_str(), pbuffer);
-    /* if (map_contains(statcache, filename)) {
-        *pbuffer = statcache[filename].first;
-        return !statcache[filename].second;
-    } else {
-        int r = stat(filename.c_str(), pbuffer);
-        statcache[filename] = std::make_pair(*pbuffer, r);
-        return !r;
-    } */
 }
 
 ino_t path_get_ino(const std::filesystem::path &path) {
@@ -100,7 +111,6 @@ ino_t path_get_ino(const std::filesystem::path &path) {
     stat(path.c_str(), &buffer);
     return buffer.st_ino;
 }
-
 
 std::uint64_t generate_unique_tid();
 
@@ -277,10 +287,15 @@ inline void trim_whitespace(std::string &str) {
     }
 }
 
-
-std::string config_directory = "/.config/ftag/"; /* NOLINT */
-std::string tags_filename = "main.tags"; /* NOLINT */
-std::string index_filename = ".fileindex"; /* NOLINT */
+ /* NOLINTBEGIN */
+std::string config_directory = "/.config/ftag/";
+const std::string c_tags_filename = "main.tags";
+const std::string c_index_filename = ".fileindex";
+std::string tags_file = c_tags_filename;
+std::string index_file = c_index_filename;
+bool set_tags_file = false;
+bool set_index_file = false;
+/* NOLINTEND */
 
 std::map<ino_t, file_info_t> file_index; /* NOLINT */
 
@@ -323,18 +338,9 @@ bool tag_name_bad(const std::string &tname) {
  * also-enabled-tag-name [e]
  */
 void read_saved_tags() {
-    if (!file_exists(config_directory)) {
-        std::filesystem::create_directory(config_directory);
-    }
-    if (!file_exists(tags_filename)) {
-        std::ofstream temp(tags_filename);
-        temp.close();
-        return;
-    }
-    std::string tags_file_content = get_file_content(tags_filename);
+    std::string tags_file_content = get_file_content(tags_file);
     std::vector<std::string> lines;
-    split(tags_file_content, "\n", lines);
-    lines.erase(std::remove(lines.begin(), lines.end(), ""), lines.end());
+    split_no_rep_delims(tags_file_content, "\n", lines);
 
     std::optional<tag_t> current_tag;
     std::unordered_map<tid_t, std::vector<std::string>> unresolved_stags; /* main tag id, supertag names */
@@ -360,12 +366,12 @@ void read_saved_tags() {
         /* is a file inode number line */
         if (no_whitespace_line[0] == '-') {
             if (!current_tag.has_value()) {
-                ERR_EXIT(1, "tag file \"%s\" line %i had \"-[file inode number]\" under no active tag", tags_filename.c_str(), i + 1);
+                ERR_EXIT(1, "tag file \"%s\" line %i had \"-[file inode number]\" under no active tag", tags_file.c_str(), i + 1);
             }
             std::string file_ino_str = no_whitespace_line.substr(1);
             ino_t file_ino = std::strtoul(file_ino_str.c_str(), nullptr, 0);
             if (file_ino == 0) {
-                ERR_EXIT(1, "tag file \"%s\" line %i had bad file inode number: \"%s\"", tags_filename.c_str(), i + 1, file_ino_str.c_str());
+                ERR_EXIT(1, "tag file \"%s\" line %i had bad file inode number: \"%s\"", tags_file.c_str(), i + 1, file_ino_str.c_str());
             }
             current_tag.value().files.push_back(file_ino);
             if (map_contains(file_index, file_ino)) {
@@ -378,21 +384,19 @@ void read_saved_tags() {
             START_TAG;
             std::string ttag;
             std::string tname;
-            bool has_colon = line.find(':') != std::string::npos;
+            std::size_t colon_pos = line.find(':');
+            bool has_colon = colon_pos != std::string::npos;
 
             /* is still a declaring tag line, just without any supertags */
             if (!has_colon) {
                 ttag = no_whitespace_line;
             } else {
-                std::vector<std::string> sections;
-                sections.reserve(2);
-                split(line, ":", sections, 2);
-                ttag = sections[0];
+                ttag = line.substr(0, colon_pos);
                 remove_whitespace(ttag);
-                supertags = sections[1];
+                supertags = line.substr(colon_pos + 1);
             }
             if (ttag.empty()) {
-                ERR_EXIT(1, "tag file \"%s\" line %i had empty tag name", tags_filename.c_str(), i + 1);
+                ERR_EXIT(1, "tag file \"%s\" line %i had empty tag name", tags_file.c_str(), i + 1);
             }
             std::size_t sqbegin = ttag.find('[');
             std::size_t sqend = ttag.find(']');
@@ -403,7 +407,7 @@ void read_saved_tags() {
 
             if (sqend != std::string::npos && sqbegin != std::string::npos) {
                 if (sqbegin >= sqend) {
-                    ERR_EXIT(1, "tag file \"%s\" line %i state list had ']' before '['", tags_filename.c_str(), i + 1);
+                    ERR_EXIT(1, "tag file \"%s\" line %i state list had ']' before '['", tags_file.c_str(), i + 1);
                 }
                 has_states = true;
                 std::string statesstr = ttag.substr(sqbegin + 1, sqend - sqbegin - 1);
@@ -421,13 +425,13 @@ void read_saved_tags() {
             if (pend != std::string::npos && pbegin != std::string::npos) {
                 current_tag.value().color = color_t();
                 if (pbegin >= pend) {
-                    ERR_EXIT(1, "tag file \"%s\" line %i color had ')' before '('", tags_filename.c_str(), i + 1);
+                    ERR_EXIT(1, "tag file \"%s\" line %i color had ')' before '('", tags_file.c_str(), i + 1);
                 }
                 has_color = true;
                 std::string hexstr = ttag.substr(pbegin + 1, pend - pbegin - 1);
                 if (hexstr[0] == '#') { hexstr.erase(hexstr.begin()); }
                 if (hex_to_rgb(hexstr, current_tag.value().color.value()) != 3) {
-                    ERR_EXIT(1, "tag file \"%s\" line %i had bad hex color: \"%s\"", tags_filename.c_str(), i + 1, hexstr.c_str());
+                    ERR_EXIT(1, "tag file \"%s\" line %i had bad hex color: \"%s\"", tags_file.c_str(), i + 1, hexstr.c_str());
                 }
             }
 
@@ -438,17 +442,17 @@ void read_saved_tags() {
             }
 
             if (tname.empty()) {
-                ERR_EXIT(1, "tag file \"%s\" line %i had empty tag name", tags_filename.c_str(), i + 1);
+                ERR_EXIT(1, "tag file \"%s\" line %i had empty tag name", tags_file.c_str(), i + 1);
             }
             /* check if tname is good */
             if (tag_name_bad(tname)) {
-                ERR_EXIT(1, "tag file \"%s\" line %i had bad tag name: \"%s\"", tags_filename.c_str(), i + 1, tname.c_str());
+                ERR_EXIT(1, "tag file \"%s\" line %i had bad tag name: \"%s\"", tags_file.c_str(), i + 1, tname.c_str());
             }
             current_tag.value().name = tname;
 
             for (const auto &[_, tag] : tags) {
                 if (tag.name == tname) {
-                    ERR_EXIT(1, "tag file \"%s\" line %i redefined tag \"%s\"", tags_filename.c_str(), i + 1, tname.c_str());
+                    ERR_EXIT(1, "tag file \"%s\" line %i redefined tag \"%s\"", tags_file.c_str(), i + 1, tname.c_str());
                 }
             }
 
@@ -457,7 +461,7 @@ void read_saved_tags() {
 
             trim_whitespace(supertags);
             if (supertags.empty()) {
-                WARN("tag file \"%s\" line %i tag name \"%s\" had empty supertags, expected supertags due to ':'", tags_filename.c_str(), i + 1, tname.c_str());
+                WARN("tag file \"%s\" line %i tag name \"%s\" had empty supertags, expected supertags due to ':'", tags_file.c_str(), i + 1, tname.c_str());
                 continue;
             }
             std::vector<std::string> tstags;
@@ -500,7 +504,7 @@ void read_saved_tags() {
                 }
             }
             if (!found) {
-                ERR_EXIT(1, "tag file \"%s\" tag \"%s\" referenced unresolved supertag \"%s\" which was never declared after", tags_filename.c_str(), tags[utag].name.c_str(), stag_name.c_str());
+                ERR_EXIT(1, "tag file \"%s\" tag \"%s\" referenced unresolved supertag \"%s\" which was never declared after", tags_file.c_str(), tags[utag].name.c_str(), stag_name.c_str());
             }
         }
         tags[utag].super.insert(tags[utag].super.end(), resolved_stag_ids.begin(), resolved_stag_ids.end());
@@ -509,7 +513,7 @@ void read_saved_tags() {
 
 /* overwrites the file */
 void dump_saved_tags() {
-    std::ofstream file(tags_filename);
+    std::ofstream file(tags_file);
     for (const auto &[id, tag] : tags) {
         file << tag.name;
 
@@ -541,49 +545,45 @@ void dump_saved_tags() {
  * [file inode number]:[full path]\0
  */
 void read_file_index() {
-    if (!file_exists(config_directory)) {
-        std::filesystem::create_directory(config_directory);
-    }
-    if (!file_exists(index_filename)) {
-        std::ofstream temp(index_filename);
-        temp.close();
-        return;
-    }
-    std::string index_content = get_file_content(index_filename);
+    std::string index_content = get_file_content(index_file);
     std::vector<std::string> lines;
     split(index_content, std::string{'\0'} + "\n", lines);
     lines.erase(std::remove(lines.begin(), lines.end(), ""), lines.end());
     for (std::uint32_t i = 0; i < lines.size(); i++) {
         const std::string &line = lines[i];
-        if (line.find(':') == std::string::npos) {
-            ERR_EXIT(1, "index file \"%s\" line %i had no ':', could not parse", index_filename.c_str(), i);
+        std::size_t colon_pos = line.find(':');
+        if (colon_pos == std::string::npos) {
+            ERR_EXIT(1, "index file \"%s\" line %i had no ':', could not parse", index_file.c_str(), i);
         }
-        std::vector<std::string> sections;
-        sections.reserve(2);
-        split(line, ":", sections, 2); /* guaranteed at least size 2 from earlier ':' check */
-        ino_t file_ino = std::strtoul(sections[0].c_str(), nullptr, 0);
+        std::string file_ino_str = line.substr(0, colon_pos);
+        ino_t file_ino = std::strtoul(file_ino_str.c_str(), nullptr, 0);
         if (file_ino == 0) {
-            ERR_EXIT(1, "index file \"%s\" line %i had bad file inode number \"%s\"", index_filename.c_str(), i, sections[0].c_str());
+            ERR_EXIT(1, "index file \"%s\" line %i had bad file inode number \"%s\"", index_file.c_str(), i, file_ino_str.c_str());
         }
-        std::string pathstr = sections[1];
-        struct stat buffer{};
-        bool exists = file_exists(pathstr, &buffer);
+        std::string pathstr = line.substr(colon_pos + 1);
+        /* struct stat buffer{};
+        bool exists = file_exists(pathstr, &buffer); */
         if (pathstr.empty()) {
-            WARN("index file \"%s\" had file inode number %lu with empty file path, you might want to run the update command", index_filename.c_str(), file_ino);
-        } else if (!pathstr.empty() && !exists) {
-            WARN("index file \"%s\" had file inode number %lu with file path \"%s\" which does not exist, you might want to run the update command", index_filename.c_str(), file_ino, pathstr.c_str());
-        } else if (exists && buffer.st_ino != file_ino) {
-            WARN("index file \"%s\" had file inode number %lu with file path \"%s\" which exists but has different inode number %lu on disk, you might want to run the update command", index_filename.c_str(), file_ino, pathstr.c_str(), buffer.st_ino);
+            WARN("index file \"%s\" had file inode number %lu with empty file path, you might want to run the update command", index_file.c_str(), file_ino);
         }
-        std::filesystem::path can = std::filesystem::weakly_canonical(pathstr);
-        file_index[file_ino] = file_info_t{file_ino, can};
+        /* else if (!pathstr.empty() && !exists) {
+            WARN("index file \"%s\" had file inode number %lu with file path \"%s\" which does not exist, you might want to run the update command", index_file.c_str(), file_ino, pathstr.c_str());
+        } else if (exists && buffer.st_ino != file_ino) {
+            WARN("index file \"%s\" had file inode number %lu with file path \"%s\" which exists but has different inode number %lu on disk, you might want to run the update command", index_file.c_str(), file_ino, pathstr.c_str(), buffer.st_ino);
+        } */
+        /* ***
+         * weakly_canonical does file exists checks... performance killer!
+         * *** */
+        /* std::filesystem::path can = std::filesystem::weakly_canonical(pathstr); */
+        file_index[file_ino] = file_info_t{file_ino, std::filesystem::path(pathstr)};
     }
 }
 
 void dump_file_index() {
-    std::ofstream file(index_filename);
+    std::ofstream file(index_file);
     for (const auto &[file_ino, file_info] : file_index) {
-        file << file_ino << ':' << std::filesystem::weakly_canonical(file_info.pathstr).string() << std::string{'\0'} + "\n";
+        /* file << file_ino << ':' << std::filesystem::weakly_canonical(file_info.pathstr).string() << std::string{'\0'} + "\n"; */
+        file << file_ino << ':' << std::filesystem::path(file_info.pathstr).string() << std::string{'\0'} + "\n";
     }
 }
 
@@ -685,15 +685,17 @@ struct fix_rule_t {
 };
 
 void add_all(const tid_t &tagid, std::vector<tid_t> &tags_visited, std::map<tid_t, bool, tagcmp_t> &tags_map, std::map<ino_t, bool> &files_map, bool exclude) {
-    for (const tid_t &id : enabled_only(tags[tagid].sub)) {
-        if (std::find(tags_visited.begin(), tags_visited.end(), id) == tags_visited.end()) {
-            tags_visited.push_back(id);
-            tags_map[id] = !exclude;
-            for (const ino_t &file_ino : tags[id].files) {
-                files_map[file_ino] = !exclude;
-            }
-            add_all(id, tags_visited, tags_map, files_map, exclude);
+    if (std::find(tags_visited.begin(), tags_visited.end(), tagid) == tags_visited.end()) {
+        tags_visited.push_back(tagid);
+        tags_map[tagid] = !exclude;
+        for (const ino_t &file_ino : tags[tagid].files) {
+            files_map[file_ino] = !exclude;
         }
+    } else {
+        return;
+    }
+    for (const tid_t &id : enabled_only(tags[tagid].sub)) {
+        add_all(id, tags_visited, tags_map, files_map, exclude);
     }
 }
 
@@ -786,58 +788,153 @@ void display_tag_info(const tag_t &tag, std::vector<tid_t> &tags_visited, std::m
 }
 
 
-/* does also output a newline, unlike display_tag_info */
-void display_file_info(const file_info_t &file_info, bool was_matched, const show_file_info_t &show_file_info, bool no_formatting) {
-    if (!no_formatting) {
-        std::cout << "  ";
+struct string_format_t {
+    std::string str;
+    bool underline = false;
+    bool bold = false;
+
+    void display(bool no_formatting, std::ostream &out = std::cout) const {
+        if (!no_formatting) {
+            if (underline) {
+                underline_out(out);
+            }
+            if (bold) {
+                bold_out(out);
+            }
+            out << str;
+            if (bold || underline) {
+                reset_out(out);
+            }
+        } else {
+            out << str;
+        }
     }
+};
+
+
+/* does not handle "  " in the beginning for noncompact output */
+string_format_t string_format_file_info(const file_info_t &file_info, bool was_matched, const show_file_info_t &show_file_info, bool no_formatting, bool quoted) {
+    std::stringstream ret;
+    bool underline = false, bold = false;
     if (show_file_info == show_file_info_t::inum_only) {
-        std::cout << file_info.file_ino;
+        ret << file_info.file_ino;
     } else {
         if (file_info.unresolved()) {
             if (!no_formatting) {
-                underline_out();
+                underline = true;
             }
             if (was_matched && !no_formatting) {
-                bold_out();
+                bold = true;
             }
-            std::cout << "<unresolved>";
-            if (!no_formatting) {
-                reset_out();
-            }
+            ret << "<unresolved>";
             if (show_file_info == show_file_info_t::full_info) {
-                std::cout << " {" << file_info.tags.size() << "} (" << file_info.file_ino << ')';
+                ret << " {" << file_info.tags.size() << "} (" << file_info.file_ino << ')';
             }
         } else {
             if (was_matched && !no_formatting) {
-                bold_out();
+                bold = true;
             }
             if (show_file_info == show_file_info_t::full_path_only) {
-                std::cout << std::filesystem::path(file_info.pathstr);
+                ret << std::filesystem::path(file_info.pathstr);
             } else if (show_file_info == show_file_info_t::full_info) {
-                std::cout << file_info.filename() << " {" << file_info.tags.size() << "} (" << file_info.file_ino << "): " << std::filesystem::path(file_info.pathstr);
+                ret << file_info.filename() << " {" << file_info.tags.size() << "} (" << file_info.file_ino << "): " << std::filesystem::path(file_info.pathstr);
             } else if (show_file_info == show_file_info_t::filename_only) {
-                std::cout << file_info.filename();
+                if (quoted) {
+                    ret << std::quoted(file_info.filename());
+                } else {
+                    ret << file_info.filename();
+                }
             } else if (show_file_info == show_file_info_t::include_parent_dir) {
                 std::filesystem::path tpath = file_info.path();
-                std::cout << (tpath.parent_path().filename()/tpath.filename()).string();
+                if (quoted) {
+                    ret << tpath.parent_path().filename()/tpath.filename();
+                } else {
+                    ret << (tpath.parent_path().filename()/tpath.filename()).string();
+                }
             } else if (show_file_info == show_file_info_t::relative_path) {
                 std::filesystem::path tpath = file_info.path();
-                std::cout << tpath.lexically_proximate(std::filesystem::current_path());
-            }
-            if (was_matched && !no_formatting) {
-                reset_out();
+                ret << tpath.lexically_proximate(std::filesystem::current_path());
+            } else if (show_file_info == show_file_info_t::inum_only) {
+                if (quoted) {
+                    ret << std::quoted(std::to_string(file_info.file_ino));
+                } else {
+                    ret << std::to_string(file_info.file_ino);
+                }
             }
         }
     }
-    std::cout << '\n';
+    return string_format_t{.str = ret.str(), .underline = underline, .bold = bold};
+}
+
+void display_file_list(const std::vector<ino_t> &file_inos, const std::map<ino_t, bool> &matched, bool compact_output, const show_file_info_t &show_file_info, bool no_formatting, bool quoted) {
+    static thread_local std::uint16_t cols = 0;
+    static constexpr std::uint64_t name_sep = 2;
+    const std::string sep(name_sep, ' ');
+    std::vector<string_format_t> formats;
+    formats.reserve(file_inos.size());
+    for (const ino_t &file_ino : file_inos) {
+        formats.push_back(string_format_file_info(file_index[file_ino], matched.at(file_ino), show_file_info, no_formatting, quoted));
+    }
+    if (compact_output) {
+        if (cols == 0) {
+            cols = get_columns();
+        }
+        std::uint64_t length = std::max(static_cast<std::int64_t>(formats.size()) * static_cast<std::int64_t>(name_sep), 0L);
+        for (const string_format_t &tformat : formats) {
+            length += tformat.str.size();
+        }
+        if (length > cols) {
+            for (std::uint32_t r = 2;; r++) { /* try all dimensions */
+                for (std::int32_t c = std::ceil(formats.size() / static_cast<long double>(r)); c >= 0; c--) {
+                    if (r * c < formats.size()) { continue; }
+                    std::vector<std::uint64_t> tlengths(c);
+                    std::uint64_t ttlength = name_sep * c;
+                    for (std::uint32_t ci = 0; ci < c; ci++) {
+                        std::uint64_t tlength = 0;
+                        for (std::uint32_t ri = 0; ri < r; ri++) {
+                            if (r * ci + ri >= formats.size()) { continue; }
+                            tlength = std::max(tlength, formats[r * ci + ri].str.size());
+                        }
+                        ttlength += tlength;
+                        tlengths[ci] = tlength;
+                    }
+                    if (ttlength <= cols || c == 1) { /* is ok, now we use */
+                        for (std::uint32_t ri = 0; ri < r; ri++) {
+                            for (std::uint32_t ci = 0; ci < c; ci++) {
+                                if (r * ci + ri >= formats.size()) { continue; }
+                                const string_format_t &tformat = formats[r * ci + ri];
+                                std::cout << sep;
+                                tformat.display(no_formatting);
+                                std::cout << std::string(tlengths[ci] - tformat.str.size(), ' ');
+                            }
+                            std::cout << '\n';
+                        }
+                        goto end_output;
+                    }
+                }
+            }
+        } else { /* can just output all in one line */
+            for (const string_format_t &tformat : formats) {
+                std::cout << sep;
+                tformat.display(no_formatting);
+            }
+            std::cout << '\n';
+        }
+        end_output: {}
+    } else {
+        for (const string_format_t &tformat : formats) {
+            std::cout << "  ";
+            tformat.display(no_formatting);
+            std::cout << '\n';
+        }
+    }
 }
 
 
 ino_t search_index(const std::filesystem::path &tpath) {
     for (const auto &[file_ino, file_info] : file_index) {
         if (file_info.pathstr_ok()) {
-            std::filesystem::path opath = std::filesystem::weakly_canonical(file_info.pathstr);
+            std::filesystem::path opath = std::filesystem::path(file_info.pathstr).lexically_normal();
             if (tpath == opath) {
                 return file_ino;
             }
@@ -908,7 +1005,7 @@ void parse_as_args(std::vector<std::string> &ret, const std::string &s, const st
 
 
 /* starts parsing from position 0 in argv, offset it if need be */
-void parse_file_args(int argc, char **argv, const std::string &err_command_name, bool is_update, std::vector<change_rule_t> &to_change, bool &search_index_first, change_entry_type_t &change_entry_type) {
+void parse_file_args(int argc, char **argv, const std::string &err_command_name, bool is_update, std::vector<change_rule_t> &to_change, bool &search_index_first, change_entry_type_t &change_entry_type, bool use_canonical) {
     std::vector<std::string> sargv;
     bool recognize_dash = true;
     bool parse_per_line = true;
@@ -954,7 +1051,19 @@ void parse_file_args(int argc, char **argv, const std::string &err_command_name,
                     ERR_EXIT(1, "%s: argument %i file/directory \"%s\" could not construct path", err_command_name.c_str(), i, sargv[i].c_str());
                 }
 
-                const std::filesystem::path tpath = std::filesystem::weakly_canonical(sargv[i]);
+                std::filesystem::path tpath;
+                if (use_canonical) {
+                    tpath = sargv[i];
+                    if (!std::filesystem::exists(tpath)) {
+                        ERR_EXIT(1, "%s: argument %i file/directory \"%s\" could not use, does not exist", err_command_name.c_str(), i, tpath.c_str());
+                    }
+                    tpath = std::filesystem::canonical(tpath);
+                } else {
+                    tpath = std::filesystem::path(sargv[i]).lexically_normal();
+                }
+                if (tpath.empty()) {
+                    ERR_EXIT(1, "%s: argument %i was empty file/directory path", err_command_name.c_str(), i);
+                }
 
                 to_change.push_back(change_rule_t{tpath, change_rule_type_t::single_file});
             }
@@ -985,7 +1094,19 @@ void parse_file_args(int argc, char **argv, const std::string &err_command_name,
                     ERR_EXIT(1, "%s: argument %i directory \"%s\" could not construct path", err_command_name.c_str(), i, sargv[i].c_str());
                 }
 
-                const std::filesystem::path tpath(sargv[i]);
+                std::filesystem::path tpath;
+                if (use_canonical) {
+                    tpath = sargv[i];
+                    if (!std::filesystem::exists(tpath)) {
+                        ERR_EXIT(1, "%s: argument %i file/directory \"%s\" could not use, does not exist", err_command_name.c_str(), i, tpath.c_str());
+                    }
+                    tpath = std::filesystem::canonical(tpath);
+                } else {
+                    tpath = std::filesystem::path(sargv[i]).lexically_normal();
+                }
+                if (tpath.empty()) {
+                    ERR_EXIT(1, "%s: argument %i was empty file/directory path", err_command_name.c_str(), i);
+                }
 
                 to_change.push_back(change_rule_t{tpath, change_rule_type_t::recursive});
             }
@@ -1053,44 +1174,97 @@ void get_all(const std::filesystem::path &path, std::vector<change_rule_t> &out,
 
 
 int main(int argc, char **argv) { /* NOLINT */
-    config_directory = std::getenv("HOME") + config_directory;
-    index_filename = config_directory + index_filename;
-    tags_filename = config_directory + tags_filename;
+    const char *envindex = std::getenv("FTAG_INDEX_FILE");
+    if (envindex && *envindex && !set_index_file) {
+        index_file = envindex;
+        set_index_file = true;
+    }
+    const char *envtags = std::getenv("FTAG_TAGS_FILE");
+    if (envtags && *envtags && !set_tags_file) {
+        tags_file = envtags;
+        set_tags_file = true;
+    }
+
+    if (!set_tags_file || !set_index_file) {
+        const char *envhome = std::getenv("HOME");
+        if (envhome && *envhome) {
+            config_directory = envhome + config_directory;
+            if (!set_tags_file) {
+                index_file = config_directory + index_file;
+                set_tags_file = true;
+            }
+            if (!set_index_file) {
+                tags_file = config_directory + tags_file;
+                set_index_file = true;
+            }
+        }
+    }
 
     if (argc <= 1) {
         WARN("no action provided, see %s --help for more information", argv[0]);
         return 1;
     }
 
+
     for (std::uint32_t i = 1; i < argc; i++) {
         if (!std::strcmp(argv[i], "--help") || !std::strcmp(argv[i], "-h")) {
             std::cout << "usage: " << argv[0] << R"( [command] [flags]
 
 description:
-    ftag is a utility to tag files/directories on your filesystem, using inode numbers to track and identify them, without modifying files on disk
+    ftag is a utility to tag files/directories on your filesystem, using inode numbers to track and identify them,
+    without modifying files on disk
 
     tags consist of a name, an optional color, and so-called supertags that they descend from
+
+commands:
+    search [flags]                      : searches for and returns tags and files
+    tag <subcommand> <tagname> [flags]  : create/edit/delete tags, and assign and remove files from tags
+    add <flags>                         : adds files to be tracked/tagged by ftag
+    rm <flags>                          : removes files to be tracked/tagged by ftag
+    update [flags]                      : updates the index of tracked files, use if some have been moved/renamed
+    fix [flags]                         : fixes the inode numbers used in the tags file and index file
+
+no command flags:
+    -h, --help                    : displays basic help
+    -H, --HELP                    : displays extended help
+    -v, --version                 : displays ftag's version
+    -w, --warn <warnlevel>        : sets warn level
+
+)";
+            return 0;
+        }
+        if (!std::strcmp(argv[i], "--HELP") || !std::strcmp(argv[i], "-H")) {
+            std::cout << "usage: " << argv[0] << R"( [command] [flags]
+
+description:
+    ftag is a utility to tag files/directories on your filesystem, using inode numbers to track and identify them,
+    without modifying files on disk
+
+    tags consist of a name, an optional color, and so-called supertags that they descend from.
     tag names can't have spaces, parens, square brackets, colons, and cannot start with a dash, encouraging a
     plain naming style like-this
 
     with designating supertags, you can construct a large and complicated tag graph. ftag supports it fine and works with
     it, but placing a tag in a cycle with itself is discouraged for obvious reasons
 
-    this version stores saved tags in ")" << tags_filename << "\" and the file index in \"" << index_filename << R"("
-    the tag file format and index file format are designed to be almost entirely human-readable and editable
+    ftag (by default) stores saved tags in "$HOME)" << config_directory << c_tags_filename << R"(" and the
+    index file in "$HOME)" << config_directory << c_index_filename << R"(".
+    the tag file format and index file format are designed to be almost entirely human-readable and editable.
     however, they do reference files by their inode numbers, which might be slightly unwieldly
 
 commands:
-    search  : searches for and returns tags and files
-    tag     : create/edit/delete tags, and assign and remove files from tags
-    add     : adds files to be tracked/tagged by ftag
-    rm      : removes files to be tracked/tagged by ftag
-    update  : updates the index of tracked files, use if some have been moved/renamed
-    fix     : fixes the inode numbers used in the tags file and file index
+    search [flags]                      : searches for and returns tags and files
+    tag <subcommand> <tagname> [flags]  : create/edit/delete tags, and assign and remove files from tags
+    add <flags>                         : adds files to be tracked/tagged by ftag
+    rm <flags>                          : removes files to be tracked/tagged by ftag
+    update [flags]                      : updates the index of tracked files, use if some have been moved/renamed
+    fix [flags]                         : fixes the inode numbers used in the tags file and index file
 
 no command flags:
-    -h, --help     : displays this help
-    -v, --version  : displays ftag's version
+    -h, --help                    : displays basic help
+    -H, --HELP                    : displays extended help
+    -v, --version                 : displays ftag's version
+    -w, --warn <warnlevel>        : sets warn level
 
 command flags:
     search:
@@ -1114,6 +1288,10 @@ command flags:
                                         only has an effect when used with --file and --file-exclude
                                       *** warning: may produce unexpected results
 
+        --compact-layout              : displays files like the multi column output `ls` or `dir has
+                                        (default)
+        --no-compact-layout           : displays one file per line
+
         --tags-files                  : displays both tags and files in result (default)
         --tags-only                   : only displays tags in result, no files
         --files-only                  : only displays files in result, no tags
@@ -1131,6 +1309,10 @@ command flags:
         --relative-path-only          : shows only the file path, but relative to the current directory
         --inum-only                   : shows only the file inode number
         --full-file-info              : shows all information about a file, including inode numbers
+
+        --quoted                      : quotes each individual file info output, only has an effect when used
+                                        with --filename-only, --include-parent, and --inum-only
+        --normal-quotes               : only quotes --full-path-only and --relative-path-only
 
         --organize-by-tag             : organizes by tag, allows duplicate file output (default)
         --organize-by-file            : organizes by file, allows duplicate tag output
@@ -1172,7 +1354,7 @@ command flags:
                                                                   (does not iterate through the contents of the directories)
         -r, --recursive <directory> [directory] ...             : adds/removes everything in the directories (recursive)
                                                                 *** note: the rm command first tries to find the passed path in the
-                                                                *** file index simply by comparing paths, then tries to remove by
+                                                                *** index file simply by comparing paths, then tries to remove by
                                                                 *** the inode number found from disk. to change this behavior, see
                                                                 *** --no-search-index
 
@@ -1198,7 +1380,7 @@ command flags:
     rm:
        --search-index                                           : searches through the index first to match paths when passed a
                                                                   --file or --recursive (default)
-       --no-search-index                                        : removes from the file index by the inode number found on the
+       --no-search-index                                        : removes from the index file by the inode number found on the
                                                                   filesystem from the passed path when passed a
                                                                   --file or --recursive
 
@@ -1218,24 +1400,27 @@ command flags:
         this is because it is impossible for an <inum> to be a valid flag, and any argument passed in that position can
         be unambiguously determined to be a flag or a positive integer
 
-        when update-ing, ftag always assumes the inode numbers stored in the file index ")" << index_filename << R"("
-        and tags file ")" << tags_filename << R"(" are correct
+        when update-ing, ftag always assumes the inode numbers stored in the index file ")" << index_file << R"("
+        and tags file ")" << tags_file << R"(" are correct
 
-        to reassign/change the inode numbers in the file index and tags file, use the fix command
+        to reassign/change the inode numbers in the index file and tags file, use the fix command
 
     fix:
         -p,  --path-all                        : replaces the inode number indexed with the one found at the current indexed path
-                                                 for all bad file index entries (i.e. assumes all paths are correct) 
+                                                 for all bad index file entries (i.e. assumes all paths are correct) 
         -pi, --path-i <inum>                   : replaces the inode number indexed with the one from <inum>'s current indexed path
                                                  from disk
         -pp, --path-p <path>                   : replaces the inode number indexed with <path> with the current inode number found
                                                  at <path> from disk
 
-        -rip, --replace-ip <inum> <path>       : manually replaces inode number <inum> in file index with the one found at <path>
-        -rii, --replace-ii <inum> <newinum>    : manually replaces inode number <inum> in file index with <newinum>
-        -rpp, --replace-pp <path> <newpath>    : manually replaces inode number associated with <path> in file index with the
+        -rip, --replace-ip <inum> <path>       : manually replaces inode number <inum> in index file with the one found at <path>
+        -rii, --replace-ii <inum> <newinum>    : manually replaces inode number <inum> in index file with <newinum>
+        -rpp, --replace-pp <path> <newpath>    : manually replaces inode number associated with <path> in index file with the
                                                  one from <newpath>
-        -rpi, --replace-pi <path> <inum>       : manually replaces inode number associated with <path> in file index with <inum>
+        -rpi, --replace-pi <path> <inum>       : manually replaces inode number associated with <path> in index file with <inum>
+
+other:
+    config file paths can be changed through $FTAG_TAGS_FILE and $FTAG_INDEX_FILE
 
 )";
             return 0;
@@ -1243,6 +1428,40 @@ command flags:
         if (!std::strcmp(argv[i], "--version") || !std::strcmp(argv[i], "-v")) {
             std::cout << "ftag version " VERSION << std::endl;
             return 0;
+        }
+        if (!std::strcmp(argv[i], "--warn") || !std::strcmp(argv[i], "-w")) {
+            if (i >= argc - 1) {
+                ERR_EXIT(1, "expected argument <warnlevel> due to warn flag (argument %i)", i);
+            }
+            std::uint32_t twarn_level = std::strtoul(argv[++i], nullptr, 0);
+            if (twarn_level == 0) {
+                ERR_EXIT(1, "invalid warn level \"%s\"", argv[i]);
+            }
+            warn_level = static_cast<warn_level_t>(twarn_level);
+        } else if (!std::strcmp(argv[i], "--set-tags-file") || !std::strcmp(argv[i], "-st")) {
+            if (i >= argc - 1) {
+                ERR_EXIT(1, "expected argument <file> due to set tags file flag (argument %i)", i);
+            }
+            std::string tpathstr = argv[++i];
+            if (!path_ok(tpathstr)) {
+                ERR_EXIT(1, "argument %i could not construct path \"%s\"", i, argv[i]);
+            }
+            if (!file_exists(tpathstr)) {
+                ERR_EXIT(1, "argument %i set tags file path \"%s\" does not exist", i, argv[i]);
+            }
+            tags_file = tpathstr;
+        } else if (!std::strcmp(argv[i], "--set-file-index") || !std::strcmp(argv[i], "-sf")) {
+            if (i >= argc - 1) {
+                ERR_EXIT(1, "expected argument <file> due to set index file flag (argument %i)", i);
+            }
+            std::string tpathstr = argv[++i];
+            if (!path_ok(tpathstr)) {
+                ERR_EXIT(1, "argument %i could not construct path \"%s\"", i, argv[i]);
+            }
+            if (!file_exists(tpathstr)) {
+                ERR_EXIT(1, "argument %i set index file path \"%s\" does not exist", i, argv[i]);
+            }
+            index_file = tpathstr;
         }
     }
 
@@ -1279,10 +1498,29 @@ command flags:
         }
     }
 
+    if (!set_tags_file) {
+        ERR_EXIT(1, "could not get valid path for the tags file");
+    }
+    if (!set_index_file) {
+        ERR_EXIT(1, "could not get valid path for the tags file");
+    }
+
+    if (!file_exists(config_directory)) {
+        std::filesystem::create_directory(config_directory);
+    }
+    if (!file_exists(index_file)) {
+        std::ofstream temp(index_file);
+        temp.close();
+    }
+    if (!file_exists(tags_file)) {
+        std::ofstream temp(tags_file);
+        temp.close();
+    }
+
     read_file_index();
     read_saved_tags();
 
-    /* TODO(stole): fully validate parsed tags and file index here, warn/suggest file editing if non-fix-able or non-update-able */
+    /* TODO(stole): fully validate parsed tags and index file here, warn/suggest file editing if non-fix-able or non-update-able */
 
     /* commands */
     if (is_search) {
@@ -1291,6 +1529,8 @@ command flags:
         display_type_t display_type = display_type_t::tags_files;
         bool color_enabled = true;
         bool organize_by_tag = true;
+        bool compact_output = true;
+        bool quoted = false;
         bool no_formatting = false;
         bool search_file_path = false;
         show_tag_info_t show_tag_info = show_tag_info_t::name_only;
@@ -1358,6 +1598,18 @@ command flags:
             } else if (targ == "--tag-name-only") {
                 show_tag_info = show_tag_info_t::name_only;
                 continue;
+            } else if (targ == "--compact-output") {
+                compact_output = true;
+                continue;
+            } else if (targ == "--no-compact-output") {
+                compact_output = false;
+                continue;
+            } else if (targ == "--quoted") {
+                quoted = true;
+                continue;
+            } else if (targ == "--normal-quotes") {
+                quoted = false;
+                continue;
             }
 
             std::string main_arg;
@@ -1400,7 +1652,7 @@ command flags:
                     ERR_EXIT(1, "search: argument %i inode number \"%s\" was not valid", i, argv[i]);
                 }
                 if (!map_contains(file_index, inum)) {
-                    ERR_EXIT(1, "search: argument %i inode number %lu was not in file index", i, inum);
+                    ERR_EXIT(1, "search: argument %i inode number %lu was not in index file", i, inum);
                 }
                 search_rules.push_back(search_rule_t{.type = rule_type, .inum = inum});
             } else if (rule_type == search_rule_type_t::all_list || rule_type == search_rule_type_t::all_list_exclude) {
@@ -1595,10 +1847,12 @@ command flags:
                         if (display_type == display_type_t::tags || display_type == display_type_t::tags_files) {
                             std::cout << '\n';
                         }
+                        std::vector<ino_t> display_file_inos;
                         for (const ino_t &file_ino : tag.files) {
                             if (!files_returned[file_ino]) { continue; }
-                            display_file_info(file_index[file_ino], files_matched[file_ino], show_file_info, no_formatting || (display_type == display_type_t::files));
+                            display_file_inos.push_back(file_ino);
                         }
+                        display_file_list(display_file_inos, files_matched, compact_output, show_file_info, no_formatting || (display_type == display_type_t::files), quoted);
                     } else if (display_type == display_type_t::tags_files || (show_file_info == show_file_info_t::filename_only && display_type != display_type_t::files)) {
                         std::cout << "(no files)\n";
                     }
@@ -1616,6 +1870,7 @@ command flags:
                     files_no_tags.push_back(file_ino);
                 }
             }
+
             if (!files_no_tags.empty()) {
                 if (display_type == display_type_t::tags || display_type == display_type_t::tags_files) {
                     std::vector<tid_t> tags_visited;
@@ -1627,17 +1882,16 @@ command flags:
                     std::cout << '\n';
                 }
                 if (display_type == display_type_t::files || display_type == display_type_t::tags_files) {
-                    for (const ino_t &file_ino : files_no_tags) {
-                        display_file_info(file_index[file_ino], files_matched[file_ino], show_file_info, no_formatting || (display_type == display_type_t::files));
-                    }
-                    if (display_type == display_type_t::tags_files && !no_formatting) {
+                    display_file_list(files_no_tags, files_matched, compact_output, show_file_info, no_formatting || (display_type == display_type_t::files), quoted);
+                    /* if (display_type == display_type_t::tags_files && !no_formatting) {
                         std::cout << '\n';
-                    }
+                    } */
                 }
                 if (display_type == display_type_t::tags) {
                     std::cout << '\n';
                 }
             }
+
         } else {
             std::vector<ino_t> no_tag_group;
             for (const auto &[file_ino, file_inc] : files_returned) {
@@ -1672,9 +1926,7 @@ command flags:
                     std::cout << '\n';
                 }
                 if (display_type == display_type_t::files || display_type == display_type_t::tags_files) {
-                    for (const ino_t &ofile_ino : group) {
-                        display_file_info(file_index[ofile_ino], files_matched[ofile_ino], show_file_info, no_formatting || (display_type == display_type_t::files));
-                    }
+                    display_file_list(group, files_matched, compact_output, show_file_info, no_formatting || (display_type == display_type_t::files), quoted);
                 }
                 if (display_type == display_type_t::tags_files && !no_formatting) {
                     std::cout << '\n';
@@ -1719,9 +1971,7 @@ command flags:
                     std::cout << '\n';
                 }
                 if (display_type == display_type_t::files || display_type == display_type_t::tags_files) {
-                    for (const ino_t &ofile_ino : no_tag_group) {
-                        display_file_info(file_index[ofile_ino], files_matched[ofile_ino], show_file_info, no_formatting || (display_type == display_type_t::files));
-                    }
+                    display_file_list(no_tag_group, files_matched, compact_output, show_file_info, no_formatting || (display_type == display_type_t::files), quoted);
                 }
                 if (display_type == display_type_t::tags_files && !no_formatting) {
                     std::cout << '\n';
@@ -1737,8 +1987,11 @@ command flags:
         change_entry_type_t change_entry_type = change_entry_type_t::only_files;
         
 
-        parse_file_args(argc - 2, argv + 2, argv[1], is_update, to_change, search_index_first, change_entry_type);
-
+        parse_file_args(argc - 2, argv + 2, argv[1], is_update, to_change, search_index_first, change_entry_type, is_add || is_update);
+        if (to_change.empty()) {
+            WARN("%s: no action provided, see %s --help for more information", argv[1], argv[0]);
+            return 0;
+        }
 
         bool changed_tags = false;
         bool changed_index = false;
@@ -1748,10 +2001,17 @@ command flags:
             if (change_rule.type == change_rule_type_t::single_file) {
                 if (is_add) {
                     if (!std::filesystem::exists(change_rule.path)) {
+                        const std::string tpathstr = change_rule.path.string();
                         ino_t maybe_ino = search_index(change_rule.path);
                         if (maybe_ino != 0) {
-                            ERR_EXIT(1, "add: file/directory \"%s\" could not be added, does not exist, but exists in file index with inode number %lu, you might want to run the update command", change_rule.path.c_str(), maybe_ino);
+                            if (tpathstr[0] == '"' && tpathstr[tpathstr.size() - 1] == '"') {
+                                ERR_EXIT(1, "add: file/directory \"%s\" could not be added, does not exist, but exists in index file with inode number %lu, you might want to run the update command, path is also possibly quoted, you might want to use --stdin-parse-as-args or -sa", change_rule.path.c_str(), maybe_ino);
+                            }
+                            ERR_EXIT(1, "add: file/directory \"%s\" could not be added, does not exist, but exists in index file with inode number %lu, you might want to run the update command", change_rule.path.c_str(), maybe_ino);
                         } else {
+                            if (tpathstr[0] == '"' && tpathstr[tpathstr.size() - 1] == '"') {
+                                ERR_EXIT(1, "add: file/directory \"%s\" could not be added, does not exist, path is possibly quoted, you might want to use --stdin-parse-as-args or -sa", change_rule.path.c_str());
+                            }
                             ERR_EXIT(1, "add: file/directory \"%s\" could not be added, does not exist", change_rule.path.c_str());
                         }
                     }
@@ -1759,7 +2019,7 @@ command flags:
                     if (!std::filesystem::is_regular_file(change_rule.path) && !std::filesystem::is_directory(change_rule.path)) {
                         ino_t maybe_ino = search_index(change_rule.path);
                         if (maybe_ino != 0) {
-                            WARN("add: file/directory \"%s\" could not be added, exists but was not a regular file or directory, but also exists in file index with inode number %lu, you might want to run the update command", change_rule.path.c_str(), maybe_ino);
+                            WARN("add: file/directory \"%s\" could not be added, exists but was not a regular file or directory, but also exists in index file with inode number %lu, you might want to run the update command", change_rule.path.c_str(), maybe_ino);
                         } else {
                             WARN("add: file/directory \"%s\" could not be added, exists but was not a regular file or directory", change_rule.path.c_str());
                         }
@@ -1767,10 +2027,10 @@ command flags:
                     }
                     ino_t file_ino = path_get_ino(change_rule.path); /* inode adder here does not insert into to_change, can ignore change_rule.file_ino */
                     if (map_contains(file_index, file_ino)) {
-                        WARN("add: file/directory \"%s\" could not be added, inode number %lu already exists in file index (associated with path \"%s\"), you might want to run update on it, skipping", change_rule.path.c_str(), file_ino, file_index[file_ino].pathstr.c_str());
+                        WARN("add: file/directory \"%s\" could not be added, inode number %lu already exists in index file (associated with path \"%s\"), you might want to run update on it, skipping", change_rule.path.c_str(), file_ino, file_index[file_ino].pathstr.c_str());
                         continue;
                     }
-                    file_index[file_ino] = file_info_t{file_ino, change_rule.path};
+                    file_index[file_ino] = file_info_t{file_ino, std::filesystem::canonical(change_rule.path)};
                     changed_index = true;
 
                 } else if (is_rm) {
@@ -1782,11 +2042,17 @@ command flags:
                         file_ino = search_use_fs(change_rule.path);
                     }
                     if (file_ino == 0) {
+                        std::string twarn_str = "rm: file/directory \"%s\" could not be removed";
                         if (search_index_first) {
-                            WARN("rm: file/directory \"%s\" could not be removed, searched both by path in file index and by its inode number (from disk) and was not found", change_rule.path.c_str());
+                            twarn_str += ", searched both by path in index file and by its inode number (from disk) and was not found";
+                            const std::string tpathstr = change_rule.path.string();
+                            if (tpathstr[0] == '"' && tpathstr[tpathstr.size() - 1] == '"') {
+                                twarn_str += ", path is possibly quoted, you might want to use --stdin-parse-as-args or -sa";
+                            }
                         } else {
-                            WARN("rm: file/directory \"%s\" could not be removed, searched by its inode number (from disk) and was not found", change_rule.path.c_str());
+                            twarn_str += ", searched by its inode number (from disk) and was not found";
                         }
+                        WARN(twarn_str.c_str(), change_rule.path.c_str());
                         continue;
                     }
                     for (const tid_t &tagid : file_index[file_ino].tags) {
@@ -1825,17 +2091,17 @@ command flags:
             } else if (change_rule.type == change_rule_type_t::inode_number) {
                 if (is_rm) {
                     if (!map_contains(file_index, change_rule.file_ino)) {
-                        ERR_EXIT(1, "%s: inode number %lu could not be removed, was not found in file index", argv[1], change_rule.file_ino);
+                        ERR_EXIT(1, "%s: inode number %lu could not be removed, was not found in index file", argv[1], change_rule.file_ino);
                     }
                     to_change.insert(to_change.begin() + ci+1, change_rule_t{.type = change_rule_type_t::single_file, .file_ino = change_rule.file_ino, .from_ino = true});
                 } else if (is_add) {
                     if (map_contains(file_index, change_rule.file_ino)) {
-                        WARN("%s: inode number %lu could not be added, already exists in file index (associated with path \"%s\"), skipping", argv[1], change_rule.file_ino, file_index[change_rule.file_ino].pathstr.c_str());
+                        WARN("%s: inode number %lu could not be added, already exists in index file (associated with path \"%s\"), skipping", argv[1], change_rule.file_ino, file_index[change_rule.file_ino].pathstr.c_str());
                         continue;
                     }
                     file_index[change_rule.file_ino] = file_info_t{change_rule.file_ino};
                     changed_index = true;
-                    WARN("%s: inode number %lu adding to file index with unresolved path, you might want to run the update command", argv[1], change_rule.file_ino);
+                    WARN("%s: inode number %lu adding to index file with unresolved path, you might want to run the update command", argv[1], change_rule.file_ino);
                 }
             }
         }
@@ -1951,7 +2217,7 @@ command flags:
                         continue; /* is good */
                     }
                     if (map_contains(file_index, buffer.st_ino)) {
-                        WARN("fix: old inode number %lu (associated with path \"%s\") could not be fixed, new inode number %lu (from old inode number path) was already in file index (associated with path \"%s\"), you might want to run the fix command with a manual replace flag, update command, or rm command, skipping", file_ino, file_info.pathstr.c_str(), buffer.st_ino, file_index[buffer.st_ino].pathstr.c_str());
+                        WARN("fix: old inode number %lu (associated with path \"%s\") could not be fixed, new inode number %lu (from old inode number path) was already in index file (associated with path \"%s\"), you might want to run the fix command with a manual replace flag, update command, or rm command, skipping", file_ino, file_info.pathstr.c_str(), buffer.st_ino, file_index[buffer.st_ino].pathstr.c_str());
                         continue;
                     }
                     ino_changes.emplace_back(file_ino, buffer.st_ino);
@@ -1972,18 +2238,18 @@ command flags:
             } else if (fix_rule.type == fix_rule_type_t::path_i) {
                 ino_t oldino = std::get<ino_t>(fix_rule.path_d);
                 if (!map_contains(file_index, oldino)) {
-                    ERR_EXIT(1, "fix: old inode number %lu could not be fixed, was not in file index", oldino);
+                    ERR_EXIT(1, "fix: old inode number %lu could not be fixed, was not in index file", oldino);
                 }
                 struct stat buffer{};
                 if (!file_exists(file_index[oldino].pathstr, &buffer)) {
                     ERR_EXIT(1, "fix: old inode number %lu could not be fixed, associated path \"%s\" was not found", oldino, file_index[oldino].pathstr.c_str());
                 }
                 if (buffer.st_ino == oldino) {
-                    WARN("fix: old inode number %lu could not be fixed, file index entry was already good (inode number matches that found at the associated path \"%s\"), skipping", oldino, file_index[oldino].pathstr.c_str());
+                    WARN("fix: old inode number %lu could not be fixed, index file entry was already good (inode number matches that found at the associated path \"%s\"), skipping", oldino, file_index[oldino].pathstr.c_str());
                     continue;
                 }
                 if (map_contains(file_index, buffer.st_ino)) {
-                    WARN("fix: old inode number %lu (associated with path \"%s\") could not be fixed, new inode number %lu (from old inode number path) was already in file index (associated with path \"%s\"), you might want to run the fix command with a manual replace flag, update command, or rm command, skipping", oldino, file_index[oldino].pathstr.c_str(), buffer.st_ino, file_index[buffer.st_ino].pathstr.c_str());
+                    WARN("fix: old inode number %lu (associated with path \"%s\") could not be fixed, new inode number %lu (from old inode number path) was already in index file (associated with path \"%s\"), you might want to run the fix command with a manual replace flag, update command, or rm command, skipping", oldino, file_index[oldino].pathstr.c_str(), buffer.st_ino, file_index[buffer.st_ino].pathstr.c_str());
                     continue;
                 }
                 for (const tid_t &tagid : file_index[oldino].tags) {
@@ -2000,18 +2266,18 @@ command flags:
                 auto path = std::get<std::filesystem::path>(fix_rule.path_d);
                 ino_t oldino = search_index(path);
                 if (oldino == 0) {
-                    ERR_EXIT(1, "fix: old inode number could not be fixed, passed path \"%s\" was not found in file index", path.c_str());
+                    ERR_EXIT(1, "fix: old inode number could not be fixed, passed path \"%s\" was not found in index file", path.c_str());
                 }
                 struct stat buffer{};
                 if (!file_exists(file_index[oldino].pathstr, &buffer)) {
                     ERR_EXIT(1, "fix: old inode number %lu (from passed path \"%s\") could not be fixed, passed path was not found", oldino, path.c_str());
                 }
                 if (buffer.st_ino == oldino) {
-                    WARN("fix: old inode number %lu (from passed path \"%s\") could not be fixed, file index entry was already good (inode number matches that found at the associated path \"%s\"), skipping", oldino, path.c_str(), file_index[oldino].pathstr.c_str()); /* here associated path and passed path should be identical but whatever */
+                    WARN("fix: old inode number %lu (from passed path \"%s\") could not be fixed, index file entry was already good (inode number matches that found at the associated path \"%s\"), skipping", oldino, path.c_str(), file_index[oldino].pathstr.c_str()); /* here associated path and passed path should be identical but whatever */
                     continue;
                 }
                 if (map_contains(file_index, buffer.st_ino)) {
-                    WARN("fix: old inode number %lu (from passed path \"%s\") could not be fixed, new inode number %lu (from old inode number path) was already in file index (associated with path \"%s\"), you might want to run the fix command with a manual replace flag, update command, or rm command, skipping", oldino, path.c_str(), buffer.st_ino, file_index[buffer.st_ino].pathstr.c_str());
+                    WARN("fix: old inode number %lu (from passed path \"%s\") could not be fixed, new inode number %lu (from old inode number path) was already in index file (associated with path \"%s\"), you might want to run the fix command with a manual replace flag, update command, or rm command, skipping", oldino, path.c_str(), buffer.st_ino, file_index[buffer.st_ino].pathstr.c_str());
                     continue;
                 }
                 for (const tid_t &tagid : file_index[oldino].tags) {
@@ -2042,19 +2308,19 @@ command flags:
                     } */
                     newino = buffer.st_ino;
                     if (!map_contains(file_index, oldino)) {
-                        ERR_EXIT(1, "fix: old inode number %lu could not be fixed, was not in file index", oldino);
+                        ERR_EXIT(1, "fix: old inode number %lu could not be fixed, was not in index file", oldino);
                     }
                     if (map_contains(file_index, newino)) {
-                        ERR_EXIT(1, "fix: old inode number %lu could not be fixed, new inode number %lu (from passed path \"%s\") was already in file index (associated with path \"%s\"), cannot replace", oldino, newino, newpath.c_str(), file_index[newino].pathstr.c_str());
+                        ERR_EXIT(1, "fix: old inode number %lu could not be fixed, new inode number %lu (from passed path \"%s\") was already in index file (associated with path \"%s\"), cannot replace", oldino, newino, newpath.c_str(), file_index[newino].pathstr.c_str());
                     }
                 } else if (is_rii) {
                     oldino = std::get<ino_t>(fix_rule.a);
                     newino = std::get<ino_t>(fix_rule.b);
                     if (!map_contains(file_index, oldino)) {
-                        ERR_EXIT(1, "fix: old inode number %lu could not be fixed, was not in file index", oldino);
+                        ERR_EXIT(1, "fix: old inode number %lu could not be fixed, was not in index file", oldino);
                     }
                     if (map_contains(file_index, newino)) {
-                        ERR_EXIT(1, "fix: old inode number %lu could not be fixed, new inode number %lu was already in file index (associated with path \"%s\"), cannot replace", oldino, newino, file_index[newino].pathstr.c_str());
+                        ERR_EXIT(1, "fix: old inode number %lu could not be fixed, new inode number %lu was already in index file (associated with path \"%s\"), cannot replace", oldino, newino, file_index[newino].pathstr.c_str());
                     }
                 } else if (is_rpi) {
                     auto path = std::get<std::filesystem::path>(fix_rule.a);
@@ -2062,13 +2328,13 @@ command flags:
                     path = std::filesystem::weakly_canonical(path);
                     oldino = search_index(path);
                     if (oldino == 0) {
-                        ERR_EXIT(1, "fix: old inode number (from passed path \"%s\") could not be fixed, passed path was not found in file index", path.c_str());
+                        ERR_EXIT(1, "fix: old inode number (from passed path \"%s\") could not be fixed, passed path was not found in index file", path.c_str());
                     }
                     if (!map_contains(file_index, oldino)) {
-                        ERR_EXIT(1, "fix: old inode number %lu (from passed path \"%s\") could not be fixed, was not in file index", oldino, path.c_str());
+                        ERR_EXIT(1, "fix: old inode number %lu (from passed path \"%s\") could not be fixed, was not in index file", oldino, path.c_str());
                     }
                     if (map_contains(file_index, newino)) {
-                        ERR_EXIT(1, "fix: old inode number %lu (from passed path \"%s\") could not be fixed, new inode number %lu was already in file index (associated with path \"%s\"), cannot replace", oldino, path.c_str(), newino, file_index[newino].pathstr.c_str());
+                        ERR_EXIT(1, "fix: old inode number %lu (from passed path \"%s\") could not be fixed, new inode number %lu was already in index file (associated with path \"%s\"), cannot replace", oldino, path.c_str(), newino, file_index[newino].pathstr.c_str());
                     }
                 } else if (is_rpp) {
                     auto path = std::get<std::filesystem::path>(fix_rule.a);
@@ -2076,10 +2342,10 @@ command flags:
                     path = std::filesystem::weakly_canonical(path);
                     oldino = search_index(path);
                     if (oldino == 0) {
-                        ERR_EXIT(1, "fix: old inode number (from passed path \"%s\") could not be fixed, passed path was not found in file index", path.c_str());
+                        ERR_EXIT(1, "fix: old inode number (from passed path \"%s\") could not be fixed, passed path was not found in index file", path.c_str());
                     }
                     if (!map_contains(file_index, oldino)) {
-                        ERR_EXIT(1, "fix: old inode number %lu (from passed path \"%s\") could not be fixed, was not in file index", oldino, path.c_str());
+                        ERR_EXIT(1, "fix: old inode number %lu (from passed path \"%s\") could not be fixed, was not in index file", oldino, path.c_str());
                     }
                     struct stat buffer{};
                     if (!file_exists(newpath, &buffer)) {
@@ -2087,7 +2353,7 @@ command flags:
                     }
                     newino = buffer.st_ino;
                     if (map_contains(file_index, newino)) {
-                        ERR_EXIT(1, "fix: old inode number %lu (from passed path \"%s\") could not be fixed, new inode number %lu (from passed path \"%s\") was already in file index (associated with path \"%s\"), cannot replace", oldino, path.c_str(), newino, newpath.c_str(), file_index[newino].pathstr.c_str());
+                        ERR_EXIT(1, "fix: old inode number %lu (from passed path \"%s\") could not be fixed, new inode number %lu (from passed path \"%s\") was already in index file (associated with path \"%s\"), cannot replace", oldino, path.c_str(), newino, newpath.c_str(), file_index[newino].pathstr.c_str());
                     }
                 }
 
@@ -2380,7 +2646,7 @@ command flags:
             bool search_index_first = true;
             change_entry_type_t change_entry_type = change_entry_type_t::only_files;
 
-            parse_file_args(argc - 4, argv + 4, "tag: " + subcommand, false, to_change, search_index_first, change_entry_type);
+            parse_file_args(argc - 4, argv + 4, "tag: " + subcommand, false, to_change, search_index_first, change_entry_type, true);
 
             bool changed_tags = false;
             bool changed_index = false;
@@ -2391,19 +2657,27 @@ command flags:
                     if (is_tag_add) {
                         if (!change_rule.from_ino) {
                             if (!std::filesystem::exists(change_rule.path)) {
+                                const std::string tpathstr = change_rule.path.string();
                                 ino_t maybe_ino = search_index(change_rule.path);
                                 if (maybe_ino != 0) {
-                                    ERR_EXIT(1, "tag: add: file/directory \"%s\" could not be tagged with tag \"%s\", does not exist, but exists in file index with inode number %lu, you might want to run the update or fix command", change_rule.path.c_str(), ttag.name.c_str(), maybe_ino);
+                                    if (tpathstr[0] == '"' && tpathstr[tpathstr.size() - 1] == '"') {
+                                        ERR_EXIT(1, "tag: add: file/directory \"%s\" could not be tagged with tag \"%s\", path does not exist, but exists in index file with inode number %lu, you might want to run the update command, path is also possibly quoted, you might want to use --stdin-parse-as-args or -sa", ttag.name.c_str(), change_rule.path.c_str(), maybe_ino);
+                                    }
+                                    ERR_EXIT(1, "tag: add: file/directory \"%s\" could not be tagged with tag \"%s\", path does not exist, but exists in index file with inode number %lu, you might want to run the update command", change_rule.path.c_str(), ttag.name.c_str(), maybe_ino);
                                 } else {
-                                    ERR_EXIT(1, "tag: add: file/directory \"%s\" could not be tagged with tag \"%s\", does not exist", change_rule.path.c_str(), ttag.name.c_str());
+                                    if (tpathstr[0] == '"' && tpathstr[tpathstr.size() - 1] == '"') {
+                                        ERR_EXIT(1, "tag: add: file/directory \"%s\" could not be tagged with tag \"%s\", path does not exist, path is possibly quoted, you might want to use --stdin-parse-as-args or -sa", change_rule.path.c_str(), ttag.name.c_str());
+                                    }
+                                    ERR_EXIT(1, "tag: add: file/directory \"%s\" could not be tagged with tag \"%s\", path does not exist", change_rule.path.c_str(), ttag.name.c_str());
                                 }
                             }
+
                             if (!std::filesystem::is_regular_file(change_rule.path) && !std::filesystem::is_directory(change_rule.path)) {
                                 ino_t maybe_ino = search_index(change_rule.path);
                                 if (maybe_ino != 0) {
-                                    WARN("tag: add: file/directory \"%s\" could not be tagged with tag \"%s\", exists but was not a regular file or directory, but also exists in file index with inode number %lu, you might want to run the update command", change_rule.path.c_str(), ttag.name.c_str(), maybe_ino);
+                                    WARN("tag: add: file/directory \"%s\" could not be tagged with tag \"%s\", path exists but was not a regular file or directory, but also exists in index file with inode number %lu, you might want to run the update command", change_rule.path.c_str(), ttag.name.c_str(), maybe_ino);
                                 } else {
-                                    WARN("tag: add: file/directory \"%s\" could not be tagged with tag \"%s\", exists but was not a regular file or directory", change_rule.path.c_str(), ttag.name.c_str());
+                                    WARN("tag: add: file/directory \"%s\" could not be tagged with tag \"%s\", path exists but was not a regular file or directory", change_rule.path.c_str(), ttag.name.c_str());
                                 }
                                 continue;
                             }
@@ -2415,11 +2689,14 @@ command flags:
                         }
                         if (!map_contains(file_index, file_ino)) {
                             if (!change_rule.from_ino) {
-                                WARN("tag: add: file/directory \"%s\" was not in file index, adding and tagging with tag \"%s\"", change_rule.path.c_str(), ttag.name.c_str());
+                                WARN("tag: add: file/directory \"%s\" was not in index file, adding and tagging with tag \"%s\"", change_rule.path.c_str(), ttag.name.c_str());
                             } else {
-                                WARN("tag: add: inode number %lu was not in file index, adding with unresolved path and tagging with tag \"%s\", you might want to run the update command", change_rule.file_ino, ttag.name.c_str());
+                                WARN("tag: add: inode number %lu was not in index file, adding with unresolved path and tagging with tag \"%s\", you might want to run the update command", change_rule.file_ino, ttag.name.c_str());
                             }
-                            file_index[file_ino] = file_info_t{file_ino, change_rule.path.string()};
+                            if (!file_exists(change_rule.path)) {
+                                ERR_EXIT(1, "tag: add: file/directory \"%s\" could not be added, does not exist", change_rule.path.c_str());
+                            }
+                            file_index[file_ino] = file_info_t{file_ino, std::filesystem::canonical(change_rule.path)};
                             changed_index = true;
                         }
                         file_info_t &file_info = file_index[file_ino];
@@ -2450,11 +2727,17 @@ command flags:
                             file_ino = search_use_fs(change_rule.path);
                         }
                         if (file_ino == 0) {
+                            std::string twarn_str = "tag rm: file/directory \"%s\" could not be untagged from tag \"%s\""; /* NOLINT */
                             if (search_index_first) {
-                                WARN("tag: rm: file/directory \"%s\" could not be untagged from tag \"%s\", searched both by path in file index and by its inode number (from disk) and was not found", change_rule.path.c_str(), ttag.name.c_str());
+                                twarn_str += ", searched both by path in index file and by its inode number (from disk) and was not found";
+                                const std::string tpathstr = change_rule.path.string();
+                                if (tpathstr[0] == '"' && tpathstr[tpathstr.size() - 1] == '"') {
+                                    twarn_str += ", path is possibly quoted, you might want to use --stdin-parse-as-args or -sa";
+                                }
                             } else {
-                                WARN("tag: rm: file/directory \"%s\" could not be untagged from tag \"%s\", searched by its inode number (from disk) and was not found", change_rule.path.c_str(), ttag.name.c_str());
+                                twarn_str += ", searched by its inode number (from disk) and was not found";
                             }
+                            WARN(twarn_str.c_str(), change_rule.path.c_str(), ttag.name.c_str());
                             continue;
                         }
                         file_info_t &file_info = file_index[file_ino];
@@ -2490,7 +2773,7 @@ command flags:
                 } else if (change_rule.type == change_rule_type_t::inode_number) {
                     if (is_tag_rm) {
                         if (!map_contains(file_index, change_rule.file_ino) && std::find(ttag.files.begin(), ttag.files.end(), change_rule.file_ino) == ttag.files.end()) {
-                            ERR_EXIT(1, "tag: %s: inode number %lu could not be untagged from tag \"%s\", was not found in file index", subcommand.c_str(), change_rule.file_ino, ttag.name.c_str());
+                            ERR_EXIT(1, "tag: %s: inode number %lu could not be untagged from tag \"%s\", was not found in index file", subcommand.c_str(), change_rule.file_ino, ttag.name.c_str());
                         }
                         to_change.insert(to_change.begin() + ci+1, change_rule_t{file_index[change_rule.file_ino].pathstr, change_rule_type_t::single_file, change_rule.file_ino, true});
                     } else if (is_tag_add) {
