@@ -1174,14 +1174,18 @@ void get_all(const std::filesystem::path &path, std::vector<change_rule_t> &out,
 
 
 int main(int argc, char **argv) { /* NOLINT */
+    bool custom_tags_file = false;
+    bool custom_index_file = false;
     const char *envindex = std::getenv("FTAG_INDEX_FILE");
     if (envindex && *envindex && !set_index_file) {
         index_file = envindex;
+        custom_index_file = true;
         set_index_file = true;
     }
     const char *envtags = std::getenv("FTAG_TAGS_FILE");
     if (envtags && *envtags && !set_tags_file) {
         tags_file = envtags;
+        custom_tags_file = true;
         set_tags_file = true;
     }
 
@@ -1505,16 +1509,22 @@ other:
         ERR_EXIT(1, "could not get valid path for the tags file");
     }
 
-    if (!file_exists(config_directory)) {
-        std::filesystem::create_directory(config_directory);
+    if (!custom_tags_file || !custom_index_file) {
+        if (!file_exists(config_directory)) {
+            std::filesystem::create_directory(config_directory);
+        }
     }
-    if (!file_exists(index_file)) {
-        std::ofstream temp(index_file);
-        temp.close();
+    if (!custom_index_file) {
+        if (!file_exists(index_file)) {
+            std::ofstream temp(index_file);
+            temp.close();
+        }
     }
-    if (!file_exists(tags_file)) {
-        std::ofstream temp(tags_file);
-        temp.close();
+    if (!custom_tags_file) {
+        if (!file_exists(tags_file)) {
+            std::ofstream temp(tags_file);
+            temp.close();
+        }
     }
 
     read_file_index();
